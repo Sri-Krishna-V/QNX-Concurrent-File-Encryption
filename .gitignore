@@ -1,0 +1,6 @@
+build/
+bin/aarch64le/encserver
+bin/aarch64le/encclient
+results.csv
+*.key
+*.enc
