@@ -18,11 +18,14 @@ typedef struct {
 } task_t;
 
 /* Copy one finished Segment into the Encrypted Block and count it. */
-static void commit_segment(task_t *task, const uint8_t *scratch, int status)
+static void commit_segment(task_t *task, const uint8_t *scratch, int status, int worker)
 {
     job_t *job = task->job;
 
     pthread_mutex_lock(&job->mutex);
+    if (worker >= 0 && (unsigned)worker < ENC_MAX_WORKERS) {
+        job->worker_segments[worker]++;
+    }
     if (status == 0) {
         memcpy(job->output + task->offset, scratch, task->length);
     } else if (job->error == 0) {
@@ -50,7 +53,7 @@ static void encrypt_segment(pool_work_t *work)
         status = cipher_ctr(job->key, job->iv, task->offset,
                             job->input + task->offset, scratch, task->length);
     }
-    commit_segment(task, scratch, status);
+    commit_segment(task, scratch, status, pool_current_worker());
     free(scratch);
 }
 
@@ -100,6 +103,7 @@ int job_run(job_t *job, worker_pool_t *pool)
     job->total_segments = count;
     job->completed_count = 0;
     job->error = 0;
+    memset(job->worker_segments, 0, sizeof job->worker_segments);
 
     start_ns = now_ns();
     for (size_t i = 0; i < count; i++) {

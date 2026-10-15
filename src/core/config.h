@@ -19,6 +19,9 @@
 /* Most Jobs in progress at once; further clients wait send-blocked. */
 #define ENC_MAX_JOBS            8u
 
+/* Largest Worker Pool the server accepts. */
+#define ENC_MAX_WORKERS         64u
+
 /* AES-256-CTR parameters. */
 #define ENC_CIPHER_BLOCK        16u
 #define ENC_KEY_LEN             32u

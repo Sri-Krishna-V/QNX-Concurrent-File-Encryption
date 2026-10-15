@@ -1,13 +1,17 @@
 /*
- * client.c - encclient: sends a Data Block to encserver and checks the result.
+ * client.c - encclient: encrypts files through encserver, decrypts them again,
+ * and benchmarks the server.
  *
- *   encclient [-k keyfile] (-f file | -s bytes) [-n runs] [-W warmups] [-o outfile] [-c] [-V]
+ *   encclient -e file [-o out] [-j n] [-V] [-x]     encrypt a file   -> file.enc
+ *   encclient -d file.enc [-o out] [-x]             decrypt it again -> file
+ *   encclient -s bytes [-n runs] [-W warmups] [-V] [-c csv] [-S]   benchmark
  *
- * The request is asynchronous for the client: a sender thread makes the
+ * File mode is in client_file.c. The benchmark sends one random Data Block per
+ * run. Each request is asynchronous for the client: a sender thread makes the
  * blocking MsgSendv call, and the main thread is notified through a condition
  * variable when the reply arrives.
  *
- * Every result can be checked two ways:
+ * A benchmark result is checked two ways:
  *   1. it must equal the Reference Encryption of the Data Block, and
  *   2. decrypting it must give back the original Data Block.
  * The first run is always checked; -V checks every run.
@@ -25,7 +29,9 @@
 #include <sys/neutrino.h>
 
 #include "cipher.h"
+#include "client.h"
 #include "config.h"
+#include "display.h"
 #include "job.h"
 #include "protocol.h"
 #include "util.h"
@@ -51,25 +57,11 @@ typedef struct {
 static void *sender_thread(void *arg)
 {
     request_t *req = arg;
-    encsvc_request_t hdr = { .type = ENCSVC_MSG_ENCRYPT, .data_len = (uint32_t)req->len };
-    iov_t siov[2], riov[2];
-    uint64_t start;
-    long status;
+    uint64_t start = now_ns();
+    int err = encsvc_encrypt(req->coid, req->data, req->encrypted, req->len, &req->reply);
 
-    SETIOV(&siov[0], &hdr, sizeof hdr);
-    SETIOV(&siov[1], (void *)req->data, req->len);
-    SETIOV(&riov[0], &req->reply, sizeof req->reply);
-    SETIOV(&riov[1], req->encrypted, req->len);
-
-    start = now_ns();
-    status = MsgSendv(req->coid, siov, 2, riov, 2);   /* blocks this thread only */
     req->round_trip_ns = now_ns() - start;
-
-    if (status == -1) {
-        req->err = errno;
-    } else if (req->reply.data_len != req->len) {
-        req->err = EBADMSG;
-    }
+    req->err = err;
 
     pthread_mutex_lock(&req->mutex);
     req->done = true;
@@ -91,27 +83,31 @@ static int request_start(request_t *req, int coid, const uint8_t *data, size_t l
     return pthread_create(&req->sender, NULL, sender_thread, req);
 }
 
-/* Wait for the reply. If show_progress, the main thread does visible work meanwhile. */
-static void request_wait(request_t *req, bool show_progress)
+/*
+ * Wait for the reply. The main thread wakes every 5 ms meanwhile, to show it
+ * is free while the server works. Returns how many 5 ms ticks passed.
+ */
+static unsigned request_wait(request_t *req, bool show_ticks)
 {
     unsigned ticks = 0;
 
     pthread_mutex_lock(&req->mutex);
     while (!req->done) {
-        if (show_progress) {
-            /* Wake every 5 ms to show the main thread is free while the server works. */
-            struct timespec deadline;
-            clock_gettime(CLOCK_REALTIME, &deadline);
-            deadline.tv_nsec += 5 * 1000 * 1000;
-            if (deadline.tv_nsec >= 1000000000L) {
-                deadline.tv_sec++;
-                deadline.tv_nsec -= 1000000000L;
+        struct timespec deadline;
+
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_nsec += 5 * 1000 * 1000;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
+        }
+        if (pthread_cond_timedwait(&req->done_cv, &req->mutex, &deadline) == ETIMEDOUT) {
+            ticks++;
+            if (show_ticks && ui_live()) {
+                printf("\r  %s%-12s%s free while waiting: %u tick%s of 5 ms", ui(UI_DIM),
+                       "main thread", ui(UI_RESET), ticks, ui_s(ticks));
+                fflush(stdout);
             }
-            if (pthread_cond_timedwait(&req->done_cv, &req->mutex, &deadline) == ETIMEDOUT) {
-                ticks++;
-            }
-        } else {
-            pthread_cond_wait(&req->done_cv, &req->mutex);
         }
     }
     pthread_mutex_unlock(&req->mutex);
@@ -119,10 +115,10 @@ static void request_wait(request_t *req, bool show_progress)
     pthread_join(req->sender, NULL);
     pthread_cond_destroy(&req->done_cv);
     pthread_mutex_destroy(&req->mutex);
-
-    if (show_progress) {
-        printf("encclient: main thread stayed free for %u ticks of 5 ms while waiting\n", ticks);
+    if (show_ticks && ui_live()) {
+        printf("\r\033[K");         /* clear the live line; the final row replaces it */
     }
+    return ticks;
 }
 
 /* Returns true if the Encrypted Block is correct. */
@@ -130,205 +126,232 @@ static bool verify(const uint8_t key[ENC_KEY_LEN], const request_t *req, uint8_t
 {
     if (reference_encrypt(key, req->reply.iv, req->data, scratch, req->len) != 0 ||
         memcmp(scratch, req->encrypted, req->len) != 0) {
-        fprintf(stderr, "encclient: result differs from Reference Encryption\n");
+        ui_error("encclient", "Encrypted Block differs from the Reference Encryption");
         return false;
     }
     if (cipher_ctr(key, req->reply.iv, 0, req->encrypted, scratch, req->len) != 0 ||
         memcmp(scratch, req->data, req->len) != 0) {
-        fprintf(stderr, "encclient: decrypting the result does not give the Data Block\n");
+        ui_error("encclient", "decrypting the result does not give the Data Block back");
         return false;
     }
     return true;
 }
 
-static uint8_t *read_file(const char *path, size_t *len)
-{
-    FILE *f = fopen(path, "rb");
-    uint8_t *buf;
-    long size;
+typedef struct {
+    size_t len;
+    unsigned runs, warmups;
+    bool verify_all;
+    const char *csv_path;           /* -c: append one row per run */
+    bool summary_only;              /* -S: print one machine-readable line */
+} bench_options_t;
 
-    if (f == NULL) {
-        perror(path);
-        return NULL;
-    }
-    if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0 || fseek(f, 0, SEEK_SET) != 0) {
-        perror(path);
-        fclose(f);
-        return NULL;
-    }
-    if ((unsigned long)size > ENC_MAX_BLOCK) {
-        fprintf(stderr, "encclient: %s is %ld bytes; the limit is %u\n", path, size, ENC_MAX_BLOCK);
-        fclose(f);
-        return NULL;
-    }
-    buf = malloc(size > 0 ? (size_t)size : 1);
-    if (buf == NULL || fread(buf, 1, (size_t)size, f) != (size_t)size) {
-        fprintf(stderr, "encclient: cannot read %s\n", path);
-        free(buf);
-        fclose(f);
-        return NULL;
-    }
-    fclose(f);
-    *len = (size_t)size;
-    return buf;
+typedef struct {
+    uint64_t sum, min, max;
+} stat_t;
+
+static void stat_add(stat_t *s, uint64_t v)
+{
+    s->sum += v;
+    if (v < s->min) s->min = v;
+    if (v > s->max) s->max = v;
 }
 
-/* Output file format: the 16-byte IV, then the Encrypted Block. */
-static int write_output(const char *path, const request_t *req)
+static int benchmark(int coid, const uint8_t key[ENC_KEY_LEN], const bench_options_t *opt)
 {
-    FILE *f = fopen(path, "wb");
-
-    if (f == NULL || fwrite(req->reply.iv, 1, ENC_IV_LEN, f) != ENC_IV_LEN ||
-        fwrite(req->encrypted, 1, req->len, f) != req->len) {
-        perror(path);
-        if (f != NULL) {
-            fclose(f);
-        }
-        return -1;
-    }
-    return fclose(f) == 0 ? 0 : -1;
-}
-
-static void usage(void)
-{
-    fprintf(stderr,
-            "usage: encclient [-k keyfile] (-f file | -s bytes) [-n runs] [-W warmups]\n"
-            "                 [-o outfile] [-c] [-V]\n"
-            "  -k keyfile  32-byte key file shared with the server (default: ./enc.key)\n"
-            "  -f file     encrypt this file (at most %u bytes)\n"
-            "  -s bytes    encrypt this many random bytes instead\n"
-            "  -n runs     measured requests to send (default: 1)\n"
-            "  -W warmups  unmeasured requests sent first (default: 0)\n"
-            "  -o outfile  write IV + Encrypted Block of the last run to outfile\n"
-            "  -c          print one CSV row per run on stdout (benchmark mode)\n"
-            "  -V          verify every run, not only the first\n",
-            ENC_MAX_BLOCK);
-    exit(2);
-}
-
-int main(int argc, char **argv)
-{
-    const char *keyfile = "enc.key", *infile = NULL, *outfile = NULL;
-    size_t len = 0;
-    unsigned runs = 1, warmups = 0;
-    bool csv = false, verify_all = false;
-    uint8_t key[ENC_KEY_LEN];
-    uint8_t *data, *encrypted, *scratch;
-    uint64_t enc_sum = 0, rtt_sum = 0, enc_min = UINT64_MAX, rtt_min = UINT64_MAX;
+    uint8_t *data = malloc(opt->len), *encrypted = malloc(opt->len), *scratch = malloc(opt->len);
+    bool human = !opt->summary_only, ok = true;
+    stat_t enc = { 0, UINT64_MAX, 0 }, rtt = { 0, UINT64_MAX, 0 };
+    FILE *csv = NULL;
     request_t req;
-    int coid, opt, err;
-    bool ok = true;
+    unsigned ticks = 0, done = 0;
+    char a[32], b[32], c[32], title[128];
 
-    while ((opt = getopt(argc, argv, "k:f:s:n:W:o:cV")) != -1) {
-        switch (opt) {
-        case 'k': keyfile = optarg; break;
-        case 'f': infile = optarg; break;
-        case 's': len = strtoul(optarg, NULL, 10); break;
-        case 'n': runs = (unsigned)strtoul(optarg, NULL, 10); break;
-        case 'W': warmups = (unsigned)strtoul(optarg, NULL, 10); break;
-        case 'o': outfile = optarg; break;
-        case 'c': csv = true; break;
-        case 'V': verify_all = true; break;
-        default: usage();
+    if (data == NULL || encrypted == NULL || scratch == NULL || random_bytes(data, opt->len) != 0) {
+        ui_error("encclient", "cannot create %zu random bytes", opt->len);
+        ok = false;
+        goto out;
+    }
+    if (opt->csv_path != NULL && (csv = fopen(opt->csv_path, "a")) == NULL) {
+        ui_error("encclient", "cannot open %s: %s", opt->csv_path, strerror(errno));
+        ok = false;
+        goto out;
+    }
+
+    if (human) {
+        snprintf(title, sizeof title, "%s random Data Block, %u run%s%s", ui_size(a, sizeof a, opt->len),
+                 opt->runs, ui_s(opt->runs), opt->warmups ? " after warm-up" : "");
+        ui_title("encclient", "benchmark", title);
+        if (opt->runs == 1) {
+            ui_row("sent", "%s (%s bytes), waiting for the reply...", ui_size(a, sizeof a, opt->len),
+                   ui_count(b, sizeof b, opt->len));
         }
     }
-    if ((infile == NULL) == (len == 0) || runs == 0) {
-        usage();
-    }
-    if (infile == NULL && len > ENC_MAX_BLOCK) {
-        fprintf(stderr, "encclient: -s %zu exceeds the limit of %u bytes\n", len, ENC_MAX_BLOCK);
-        return 1;
-    }
 
-    err = keyfile_load(keyfile, key);
-    if (err != 0) {
-        fprintf(stderr, "encclient: cannot load key file %s: %s\n", keyfile, strerror(err));
-        return 1;
-    }
-    if (infile != NULL) {
-        data = read_file(infile, &len);
-        if (data == NULL) {
-            return 1;
-        }
-    } else {
-        data = malloc(len);
-        if (data == NULL || random_bytes(data, len) != 0) {
-            fprintf(stderr, "encclient: cannot create %zu random bytes\n", len);
-            return 1;
-        }
-    }
-    encrypted = malloc(len > 0 ? len : 1);
-    scratch = malloc(len > 0 ? len : 1);
-    if (encrypted == NULL || scratch == NULL) {
-        fprintf(stderr, "encclient: out of memory\n");
-        return 1;
-    }
+    for (unsigned i = 0; i < opt->warmups + opt->runs && ok; i++) {
+        bool measured = i >= opt->warmups;
+        unsigned run = i - opt->warmups + 1;
+        bool checked = measured && (run == 1 || opt->verify_all);
 
-    coid = name_open(ENCSVC_NAME, 0);
-    if (coid == -1) {
-        perror("encclient: name_open(\"" ENCSVC_NAME "\") - is encserver running?");
-        return 1;
-    }
-
-    for (unsigned i = 0; i < warmups + runs && ok; i++) {
-        bool measured = i >= warmups;
-        unsigned run = i - warmups + 1;
-
-        if (request_start(&req, coid, data, len, encrypted) != 0) {
-            fprintf(stderr, "encclient: cannot start sender thread\n");
+        if (request_start(&req, coid, data, opt->len, encrypted) != 0) {
+            ui_error("encclient", "cannot start a sender thread");
             ok = false;
             break;
         }
-        if (!csv && measured) {
-            printf("encclient: sent %zu bytes, waiting for the reply...\n", len);
-        }
-        request_wait(&req, !csv && measured);
-
+        ticks = request_wait(&req, human && opt->runs == 1);
         if (req.err != 0) {
-            fprintf(stderr, "encclient: request failed: %s\n", strerror(req.err));
+            if (human && opt->runs > 1 && ui_live()) {
+                putchar('\n');
+            }
+            ui_error("encclient", "request failed: %s", strerror(req.err));
             ok = false;
             break;
         }
         if (!measured) {
             continue;
         }
-
-        bool checked = run == 1 || verify_all;
         if (checked && !verify(key, &req, scratch)) {
             ok = false;
         }
+        stat_add(&enc, req.reply.encryption_ns);
+        stat_add(&rtt, req.round_trip_ns);
+        done++;
+        if (csv != NULL) {
+            fprintf(csv, "%u,%zu,%u,%u,%.1f,%.1f,%s\n", req.reply.workers, opt->len,
+                    req.reply.segments, run, (double)req.reply.encryption_ns / 1e3,
+                    (double)req.round_trip_ns / 1e3, checked ? (ok ? "pass" : "FAIL") : "-");
+        }
+        if (human && opt->runs > 1) {
+            ui_progress("progress", run, opt->runs, "runs");
+        }
+    }
+    if (!ok || done == 0) {
+        goto out;
+    }
 
-        enc_sum += req.reply.encryption_ns;
-        rtt_sum += req.round_trip_ns;
-        if (req.reply.encryption_ns < enc_min) enc_min = req.reply.encryption_ns;
-        if (req.round_trip_ns < rtt_min) rtt_min = req.round_trip_ns;
+    if (opt->summary_only) {
+        /* workers bytes runs enc_mean_us enc_min_us rtt_mean_us rtt_min_us */
+        printf("%u %zu %u %llu %llu %llu %llu\n", req.reply.workers, opt->len, done,
+               (unsigned long long)(enc.sum / done / 1000), (unsigned long long)(enc.min / 1000),
+               (unsigned long long)(rtt.sum / done / 1000), (unsigned long long)(rtt.min / 1000));
+        goto out;
+    }
 
-        if (csv) {
-            printf("%u,%zu,%u,%u,%.1f,%.1f,%s\n", req.reply.workers, len, req.reply.segments,
-                   run, (double)req.reply.encryption_ns / 1e3, (double)req.round_trip_ns / 1e3,
-                   checked ? (ok ? "pass" : "FAIL") : "-");
+    if (opt->runs == 1) {
+        ui_row("main thread", "free for %u tick%s of 5 ms while the server worked", ticks, ui_s(ticks));
+        ui_row("server", "%u workers, %u Segment%s", req.reply.workers, req.reply.segments,
+               ui_s(req.reply.segments));
+        ui_row("encryption", "%s on the server  (%s)", ui_ms(a, sizeof a, enc.sum),
+               ui_rate(c, sizeof c, opt->len, enc.sum));
+        ui_row("round trip", "%s on the client", ui_ms(b, sizeof b, rtt.sum));
+        ui_row("check", "%s%s verified%s: same as the Reference Encryption, and decrypts back",
+               ui(UI_GREEN), ui_ok(), ui(UI_RESET));
+    } else {
+        ui_row("server", "%u workers, %u Segment%s per run", req.reply.workers, req.reply.segments,
+               ui_s(req.reply.segments));
+        ui_row("encryption", "mean %s   min %s   max %s", ui_ms(a, sizeof a, enc.sum / done),
+               ui_ms(b, sizeof b, enc.min), ui_ms(c, sizeof c, enc.max));
+        ui_row("round trip", "mean %s   min %s   max %s", ui_ms(a, sizeof a, rtt.sum / done),
+               ui_ms(b, sizeof b, rtt.min), ui_ms(c, sizeof c, rtt.max));
+        ui_row("speed", "%s (mean encryption)", ui_rate(a, sizeof a, opt->len, enc.sum / done));
+        if (opt->verify_all) {
+            ui_row("check", "%s%s all %u runs verified%s", ui(UI_GREEN), ui_ok(), done, ui(UI_RESET));
         } else {
-            printf("encclient: run %u: %u workers, %u segments, encryption %.3f ms, "
-                   "round trip %.3f ms%s\n",
-                   run, req.reply.workers, req.reply.segments,
-                   (double)req.reply.encryption_ns / 1e6, (double)req.round_trip_ns / 1e6,
-                   checked ? (ok ? ", verified" : ", VERIFY FAILED") : "");
+            ui_row("check", "%s%s run 1 verified%s  (add -V to check every run)", ui(UI_GREEN),
+                   ui_ok(), ui(UI_RESET));
         }
     }
 
-    if (ok && runs > 1) {
-        fprintf(stderr, "encclient: %u runs, %u workers: encryption mean %.3f ms (min %.3f), "
-                        "round trip mean %.3f ms (min %.3f)\n",
-                runs, req.reply.workers, (double)enc_sum / runs / 1e6, (double)enc_min / 1e6,
-                (double)rtt_sum / runs / 1e6, (double)rtt_min / 1e6);
+out:
+    if (csv != NULL) {
+        fclose(csv);
     }
-    if (ok && outfile != NULL && write_output(outfile, &req) != 0) {
-        ok = false;
-    }
-
-    name_close(coid);
     free(data);
     free(encrypted);
     free(scratch);
     return ok ? 0 : 1;
+}
+
+static int usage(void)
+{
+    fprintf(stderr,
+            "usage:\n"
+            "  encclient -e file [-o out.enc] [-j n] [-V] [-x]   encrypt a file (default out: ./file.enc)\n"
+            "  encclient -d file.enc [-o out] [-x]               decrypt it (default out: ./<original name>)\n"
+            "  encclient -s bytes [-n runs] [-W warmups] [-V] [-c file.csv] [-S]   benchmark\n"
+            "\n"
+            "  -k keyfile  32-byte key file shared with the server (default: ./enc.key)\n"
+            "  -o out      output file name\n"
+            "  -j n        Data Blocks in flight at once, 1 to %u (default: 4)\n"
+            "  -x          show the first 16 bytes before and after\n"
+            "  -V          verify every Data Block / run against the Reference Encryption\n"
+            "  -s bytes    benchmark with one random Data Block of this size (at most %u)\n"
+            "  -n runs     measured requests (default: 1)\n"
+            "  -W warmups  unmeasured requests sent first (default: 0)\n"
+            "  -c file     append one CSV row per run to file\n"
+            "  -S          print only a summary line: workers bytes runs enc_mean_us enc_min_us\n"
+            "              rtt_mean_us rtt_min_us\n",
+            ENC_MAX_JOBS, ENC_MAX_BLOCK);
+    return 2;
+}
+
+int main(int argc, char **argv)
+{
+    const char *keyfile = "enc.key", *encrypt_path = NULL, *decrypt_path = NULL;
+    bench_options_t bench = { .runs = 1 };
+    file_options_t file = { .in_flight = 4 };
+    uint8_t key[ENC_KEY_LEN];
+    int coid, opt, err, modes, status;
+
+    while ((opt = getopt(argc, argv, "k:e:d:o:j:xs:n:W:c:SV")) != -1) {
+        switch (opt) {
+        case 'k': keyfile = optarg; break;
+        case 'e': encrypt_path = optarg; break;
+        case 'd': decrypt_path = optarg; break;
+        case 'o': file.out_path = optarg; break;
+        case 'j': file.in_flight = (unsigned)strtoul(optarg, NULL, 10); break;
+        case 'x': file.preview = true; break;
+        case 's': bench.len = strtoul(optarg, NULL, 10); break;
+        case 'n': bench.runs = (unsigned)strtoul(optarg, NULL, 10); break;
+        case 'W': bench.warmups = (unsigned)strtoul(optarg, NULL, 10); break;
+        case 'c': bench.csv_path = optarg; break;
+        case 'S': bench.summary_only = true; break;
+        case 'V': file.verify = bench.verify_all = true; break;
+        default: return usage();
+        }
+    }
+    modes = (encrypt_path != NULL) + (decrypt_path != NULL) + (bench.len != 0);
+    if (modes != 1 || optind != argc || bench.runs == 0 || file.in_flight == 0 ||
+        file.in_flight > ENC_MAX_JOBS) {
+        return usage();
+    }
+    ui_init();
+    if (bench.len > ENC_MAX_BLOCK) {
+        ui_error("encclient", "-s %zu exceeds the limit of %u bytes", bench.len, ENC_MAX_BLOCK);
+        return 1;
+    }
+
+    err = keyfile_load(keyfile, key);
+    if (err != 0) {
+        ui_error("encclient", "cannot load key file %s: %s", keyfile, strerror(err));
+        return 1;
+    }
+    file.key = key;
+
+    if (decrypt_path != NULL) {
+        return decrypt_file(decrypt_path, &file);   /* needs no server */
+    }
+
+    coid = name_open(ENCSVC_NAME, 0);
+    if (coid == -1) {
+        ui_error("encclient", "cannot reach \"%s\": %s. Is encserver running?", ENCSVC_NAME,
+                 strerror(errno));
+        return 1;
+    }
+    if (encrypt_path != NULL) {
+        status = encrypt_file(coid, encrypt_path, &file);
+    } else {
+        status = benchmark(coid, key, &bench);
+    }
+    name_close(coid);
+    return status;
 }

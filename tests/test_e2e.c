@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include <sys/dispatch.h>
 #include <sys/neutrino.h>
@@ -26,7 +27,8 @@ int encclient_main(int argc, char **argv);
 
 #define KEYFILE "build/host/e2e.key"
 #define INFILE  "build/host/e2e_in.bin"
-#define OUTFILE "build/host/e2e_out.bin"
+#define ENCFILE "build/host/e2e_in.bin.enc"
+#define DECFILE "build/host/e2e_dec.bin"
 
 static int failures;
 static uint8_t key[ENC_KEY_LEN];
@@ -93,33 +95,172 @@ static void test_client_runs(void)
 {
     char *big[] = { "encclient", "-k", KEYFILE, "-s", "2097152", "-n", "3", "-V", NULL };
     char *tiny[] = { "encclient", "-k", KEYFILE, "-s", "1", "-n", "2", "-V", NULL };
-    char *edge[] = { "encclient", "-k", KEYFILE, "-s", "65536", "-n", "2", "-c", "-V", NULL };
+    char *edge[] = { "encclient", "-k", KEYFILE, "-s", "65536", "-n", "2", "-c", "build/host/e2e.csv", "-V", NULL };
     char *over[] = { "encclient", "-k", KEYFILE, "-s", "2097153", NULL };
-    char *file[] = { "encclient", "-k", KEYFILE, "-f", INFILE, "-o", OUTFILE, "-W", "1", NULL };
-    size_t len = 100000;
-    uint8_t *in = malloc(len), *out = malloc(ENC_IV_LEN + len), *dec = malloc(len);
-    FILE *f;
 
     CHECK(run_client(big) == 0, "2 MB client run");
     CHECK(run_client(tiny) == 0, "1-byte client run");
     CHECK(run_client(edge) == 0, "64 KB client run (CSV mode)");
     CHECK(run_client(over) != 0, "client must refuse more than 2 MB");
+}
 
-    /* File in, file out: output is IV + Encrypted Block, and decrypts to the file. */
-    random_bytes(in, len);
-    CHECK(write_file(INFILE, in, len) == 0, "write input file");
-    CHECK(run_client(file) == 0, "file client run");
-    f = fopen(OUTFILE, "rb");
-    CHECK(f != NULL && fread(out, 1, ENC_IV_LEN + len, f) == ENC_IV_LEN + len,
-          "output file has IV + %zu bytes", len);
+/* Write len random bytes to path. Returns 0 or -1. */
+static int write_random_file(const char *path, size_t len)
+{
+    uint8_t *buf = malloc(len > 0 ? len : 1);
+    int rc = buf != NULL && random_bytes(buf, len) == 0 ? write_file(path, buf, len) : -1;
+
+    free(buf);
+    return rc;
+}
+
+/* 1 if both files exist and hold the same bytes. */
+static int same_file(const char *a, const char *b)
+{
+    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
+    int same = fa != NULL && fb != NULL;
+
+    while (same) {
+        int ca = fgetc(fa), cb = fgetc(fb);
+        if (ca != cb) {
+            same = 0;
+        } else if (ca == EOF) {
+            break;
+        }
+    }
+    if (fa != NULL) {
+        fclose(fa);
+    }
+    if (fb != NULL) {
+        fclose(fb);
+    }
+    return same;
+}
+
+/* Encrypt INFILE to ENCFILE with -e, decrypt that to DECFILE with -d. 1 if DECFILE == INFILE. */
+static int round_trip(const char *jobs)
+{
+    char *enc[] = { "encclient", "-k", KEYFILE, "-e", INFILE, "-o", ENCFILE, "-j", (char *)jobs, NULL };
+    char *dec[] = { "encclient", "-k", KEYFILE, "-d", ENCFILE, "-o", DECFILE, NULL };
+
+    unlink(ENCFILE);
+    unlink(DECFILE);
+    return run_client(enc) == 0 && run_client(dec) == 0 && same_file(INFILE, DECFILE);
+}
+
+static void test_file_round_trip(void)
+{
+    CHECK(write_random_file(INFILE, 100000) == 0, "write input file");
+    CHECK(round_trip("4"), "100 KB file: encrypt then decrypt gives the same bytes");
+
+    /* Several Data Blocks, the last one short, with 1 and with 8 in flight. */
+    CHECK(write_random_file(INFILE, 2 * ENC_MAX_BLOCK + 12345) == 0, "write input file");
+    CHECK(round_trip("1"), "3-block file, 1 in flight");
+    CHECK(round_trip("8"), "3-block file, 8 in flight");
+
+    CHECK(write_random_file(INFILE, ENC_MAX_BLOCK) == 0, "write input file");
+    CHECK(round_trip("4"), "file of exactly one full Data Block");
+
+    CHECK(write_random_file(INFILE, 1) == 0, "write input file");
+    CHECK(round_trip("4"), "1-byte file");
+
+    CHECK(write_random_file(INFILE, 0) == 0, "write input file");
+    CHECK(round_trip("4"), "empty file");
+}
+
+/* Read the first `cap - 1` bytes of path as text. */
+static void read_text(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    size_t n = f != NULL ? fread(buf, 1, cap - 1, f) : 0;
+
+    buf[n] = '\0';
     if (f != NULL) {
         fclose(f);
     }
-    CHECK(cipher_ctr(key, out, 0, out + ENC_IV_LEN, dec, len) == 0 && memcmp(dec, in, len) == 0,
-          "output file decrypts to the input file");
-    free(in);
-    free(out);
-    free(dec);
+}
+
+static void test_encrypted_file_header_is_readable(void)
+{
+    static const char expect[] = "QNX-ENC v1\n"
+                                 "name    e2e_in.bin\n"
+                                 "size    2097162 bytes\n"
+                                 "blocks  2 of up to 2097152 bytes\n"
+                                 "iv 1    ";
+    char text[4096];
+
+    CHECK(write_random_file(INFILE, ENC_MAX_BLOCK + 10) == 0, "write input file");
+    CHECK(round_trip("4"), "2-block file");
+    read_text(ENCFILE, text, sizeof text);
+    CHECK(strncmp(text, expect, strlen(expect)) == 0,
+          "header starts with magic, name, size and blocks lines:\n%.120s", text);
+    CHECK(strstr(text, "\niv 2    ") != NULL && strstr(text, "\n---\n") != NULL,
+          "header lists iv 2 and ends with ---");
+}
+
+static void test_decrypt_refuses_bad_input(void)
+{
+    char *dec_plain[] = { "encclient", "-k", KEYFILE, "-d", INFILE, "-o", DECFILE, NULL };
+    char *dec[] = { "encclient", "-k", KEYFILE, "-d", ENCFILE, "-o", DECFILE, NULL };
+    char *dec_short[] = { "encclient", "-k", KEYFILE, "-d", DECFILE ".short", "-o", DECFILE, NULL };
+    uint8_t marker[] = "keep me";
+    uint8_t *buf = malloc(200000);
+    FILE *f;
+    size_t n;
+
+    CHECK(write_random_file(INFILE, 100000) == 0, "write input file");
+    CHECK(round_trip("4"), "100 KB file");
+
+    /* An existing output file is never overwritten. */
+    CHECK(write_file(DECFILE, marker, sizeof marker) == 0, "write marker file");
+    CHECK(run_client(dec) != 0, "-d must refuse to overwrite an existing file");
+    f = fopen(DECFILE, "rb");
+    n = f != NULL ? fread(buf, 1, 200000, f) : 0;
+    CHECK(n == sizeof marker && memcmp(buf, marker, n) == 0, "existing file left untouched");
+    if (f != NULL) {
+        fclose(f);
+    }
+
+    /* A file that is not an Encrypted File is rejected and nothing is written. */
+    unlink(DECFILE);
+    CHECK(run_client(dec_plain) != 0, "-d must reject a file without the header");
+    CHECK(access(DECFILE, F_OK) != 0, "no output after rejecting a plain file");
+
+    /* A cut-short Encrypted File is rejected and nothing is written. */
+    f = fopen(ENCFILE, "rb");
+    n = f != NULL ? fread(buf, 1, 200000, f) : 0;
+    if (f != NULL) {
+        fclose(f);
+    }
+    CHECK(n > 1000 && write_file(DECFILE ".short", buf, n - 1000) == 0, "write short copy");
+    CHECK(run_client(dec_short) != 0, "-d must reject a cut-short Encrypted File");
+    CHECK(access(DECFILE, F_OK) != 0, "no output after rejecting a short file");
+    free(buf);
+}
+
+/* Without -o, -e writes ./<name>.enc and -d writes ./<original name>. */
+static void test_default_output_names(void)
+{
+    char cwd[4096], in_path[4200];
+    char *enc[] = { "encclient", "-k", NULL, "-e", in_path, NULL };
+    char *dec[] = { "encclient", "-k", NULL, "-d", "e2e_in.bin.enc", NULL };
+    char key_path[4200];
+
+    CHECK(getcwd(cwd, sizeof cwd) != NULL, "getcwd");
+    snprintf(in_path, sizeof in_path, "%s/%s", cwd, INFILE);
+    snprintf(key_path, sizeof key_path, "%s/%s", cwd, KEYFILE);
+    enc[2] = dec[2] = key_path;
+    CHECK(write_random_file(INFILE, 5000) == 0, "write input file");
+    mkdir("build/host/e2e_cwd", 0755);
+    CHECK(chdir("build/host/e2e_cwd") == 0, "chdir");
+    unlink("e2e_in.bin.enc");
+    unlink("e2e_in.bin");
+
+    CHECK(run_client(enc) == 0 && access("e2e_in.bin.enc", F_OK) == 0,
+          "-e without -o writes ./e2e_in.bin.enc");
+    CHECK(run_client(dec) == 0 && same_file("e2e_in.bin", in_path),
+          "-d without -o restores ./e2e_in.bin");
+    CHECK(chdir(cwd) == 0, "chdir back");
 }
 
 static void test_server_rejects_bad_requests(void)
@@ -192,6 +333,10 @@ int main(void)
     name_open(ENCSVC_NAME, 0);      /* waits until the server has attached */
 
     test_client_runs();
+    test_file_round_trip();
+    test_encrypted_file_header_is_readable();
+    test_decrypt_refuses_bad_input();
+    test_default_output_names();
     test_server_rejects_bad_requests();
     test_concurrent_clients();
 

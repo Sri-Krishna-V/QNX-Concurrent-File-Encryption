@@ -12,8 +12,14 @@
 
 #include "worker_pool.h"
 
+typedef struct {
+    worker_pool_t *pool;
+    unsigned index;
+} worker_arg_t;
+
 struct worker_pool {
     pthread_t *threads;
+    worker_arg_t *args;
     unsigned num_workers;
 
     pthread_mutex_t queue_mutex;
@@ -23,9 +29,20 @@ struct worker_pool {
     bool shutdown;                  /* guarded by queue_mutex */
 };
 
+/* Index of the worker running on this thread, or -1 on any other thread. */
+static _Thread_local int current_worker = -1;
+
+int pool_current_worker(void)
+{
+    return current_worker;
+}
+
 static void *worker_loop(void *arg)
 {
-    worker_pool_t *pool = arg;
+    const worker_arg_t *self = arg;
+    worker_pool_t *pool = self->pool;
+
+    current_worker = (int)self->index;
 
     for (;;) {
         pool_work_t *work;
@@ -63,7 +80,10 @@ worker_pool_t *pool_create(unsigned num_workers)
         return NULL;
     }
     pool->threads = calloc(num_workers, sizeof *pool->threads);
-    if (pool->threads == NULL) {
+    pool->args = calloc(num_workers, sizeof *pool->args);
+    if (pool->threads == NULL || pool->args == NULL) {
+        free(pool->threads);
+        free(pool->args);
         free(pool);
         return NULL;
     }
@@ -71,7 +91,9 @@ worker_pool_t *pool_create(unsigned num_workers)
     pthread_cond_init(&pool->not_empty_cv, NULL);
 
     for (unsigned i = 0; i < num_workers; i++) {
-        if (pthread_create(&pool->threads[i], NULL, worker_loop, pool) != 0) {
+        pool->args[i].pool = pool;
+        pool->args[i].index = i;
+        if (pthread_create(&pool->threads[i], NULL, worker_loop, &pool->args[i]) != 0) {
             pool->num_workers = i;  /* stop the ones already running */
             pool_destroy(pool);
             return NULL;
@@ -114,5 +136,6 @@ void pool_destroy(worker_pool_t *pool)
     pthread_cond_destroy(&pool->not_empty_cv);
     pthread_mutex_destroy(&pool->queue_mutex);
     free(pool->threads);
+    free(pool->args);
     free(pool);
 }

@@ -30,6 +30,7 @@ typedef struct job {
     size_t completed_count;
     int error;                      /* first Task failure, 0 if none */
     uint64_t finish_ns;             /* set by the worker that completes the last Segment */
+    unsigned worker_segments[ENC_MAX_WORKERS];  /* Segments done by each worker, for the log */
 
     pthread_mutex_t mutex;
     pthread_cond_t done_cv;         /* signalled when completed_count == total_segments */
