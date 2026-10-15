@@ -1,6 +1,6 @@
 # Lab Guide: Build and Run on the Raspberry Pi 4B
 
-This guide takes you from a lab PC with QNX SDP 8.0.3 and Momentics to a benchmark CSV file produced on the Raspberry Pi 4B. Follow the parts in order. A part that starts with **Skip if…** can be left out when your setup is already there.
+This guide takes you from a lab PC with QNX SDP 8.0.3 and Momentics to the live demo and a benchmark CSV file on the Raspberry Pi 4B. Follow the parts in order. A part that starts with **Skip if…** can be left out when your setup is already there.
 
 Commands in `this style` run on the **lab PC** unless the step says **on the Pi**.
 
@@ -66,6 +66,7 @@ Commands in `this style` run on the **lab PC** unless the step says **on the Pi*
    - The password is `qnxuser`.
    - Windows OpenSSH needs the `-o MACs=hmac-sha2-256` option. On Linux you can leave it out.
    - **If `qnxpi.local` is not found:** log in on the Pi's own screen (user `qnxuser`, password `qnxuser`), run `ifconfig`, note the IPv4 address, and use it instead of `qnxpi.local` everywhere in this guide.
+   - In our lab the Pi is at **10.0.0.1**: `ssh -o MACs=hmac-sha2-256 qnxuser@10.0.0.1`. The rest of this guide uses that address.
 4. The accounts are:
 
    | User | Password | Note |
@@ -89,6 +90,7 @@ make
 This creates `bin\aarch64le\encserver` and `bin\aarch64le\encclient`.
 
 - If OpenSSL is missing (see Part 1), build with `make CRYPTO=builtin` instead.
+- Our lab build uses `make CRYPTO=builtin` (the server banner then says `builtin backend`).
 - After changing the build option, run `make clean` before `make` again.
 
 ### Option B: Momentics
@@ -102,18 +104,25 @@ Menu names can differ slightly between Momentics versions. If you can't find the
 
 ---
 
-## Part 5: Copy the programs to the Pi
+## Part 5: Copy everything to the Pi
 
-From the project folder on the lab PC:
+From the project folder on the lab PC, after building (Part 4):
 
 ```
-ssh -o MACs=hmac-sha2-256 qnxuser@qnxpi.local "mkdir -p encsvc"
-scp -o MACs=hmac-sha2-256 bin/aarch64le/encserver bin/aarch64le/encclient scripts/bench.sh qnxuser@qnxpi.local:encsvc/
+make deploy
 ```
 
-The files land in `/data/home/qnxuser/encsvc` on the Pi.
+This copies `encserver`, `encclient`, `demo.sh`, `bench.sh`, `lib.sh` and the `examples` folder to `/var/encsvc` on the Pi at `qnxuser@10.0.0.1`, and makes the programs executable. You type the `qnxuser` password up to four times.
 
-*Alternative:* in Momentics, add the Pi as a target (launch bar → **Launch Target** drop-down → **New Launch Target** → **QNX Target** → host `qnxpi.local`, port `8000`). Then drag the files into **Target File System Navigator**.
+- **Different address or folder:** `make deploy PI=qnxuser@qnxpi.local PI_DIR=/data/home/qnxuser/encsvc`
+- **By hand**, if `make deploy` does not work on your PC:
+  ```
+  ssh -o MACs=hmac-sha2-256 qnxuser@10.0.0.1 "mkdir -p /var/encsvc"
+  scp -o MACs=hmac-sha2-256 bin/aarch64le/encserver bin/aarch64le/encclient scripts/demo.sh scripts/bench.sh scripts/lib.sh qnxuser@10.0.0.1:/var/encsvc/
+  scp -r -o MACs=hmac-sha2-256 examples qnxuser@10.0.0.1:/var/encsvc/
+  ```
+
+*Alternative:* in Momentics, add the Pi as a target (launch bar → **Launch Target** drop-down → **New Launch Target** → **QNX Target** → host `10.0.0.1`, port `8000`). Then drag the files into **Target File System Navigator**.
 
 ---
 
@@ -121,60 +130,84 @@ The files land in `/data/home/qnxuser/encsvc` on the Pi.
 
 1. Log in (Part 3), then:
    ```
-   cd encsvc
-   chmod +x encserver encclient bench.sh
+   cd /var/encsvc
+   chmod +x encserver encclient demo.sh bench.sh
    ```
-2. **Create the key file.** The client and the server must use the same one:
+2. **Create the key file**, once. The client and the server must use the same one:
    ```
    dd if=/dev/urandom of=enc.key bs=32 count=1
    ```
    If `dd` is not available, use `head -c 32 /dev/urandom > enc.key`.
-3. **Start the server** in the background, with one log line per Job:
+3. **Start the server** with its live log:
    ```
    ./encserver -v &
    ```
-   Expected output:
+   It prints a short banner (name, workers, cipher, limits) and a header line for the log. If you see `name_attach: Operation not permitted`, run `su` (password `root`) and repeat steps 1–3 as root, in the same folder.
+4. **Encrypt a file:**
    ```
-   encserver: ready as "encsvc", 4 workers, cipher openssl, max block 2097152 bytes, max 8 jobs
+   ./encclient -e examples/hello.txt -x
    ```
-   If you see `name_attach: Operation not permitted`, run `su` (password `root`) and repeat steps 1–3 as root, in the same folder.
-4. **Encrypt a 2 MB random Data Block:**
+   - The output `hello.txt.enc` is an **Encrypted File**. `head -n 6 hello.txt.enc` shows its readable header: the original name, the size, and one IV per Data Block.
+   - `-x` shows the first 16 bytes before and after encryption.
+   - The server prints two lines for the Job: `→ received`, then `✔` with the time and how many Segments each worker encrypted.
+5. **Decrypt it again**, on the client only:
+   ```
+   ./encclient -d hello.txt.enc -o hello-copy.txt
+   cmp examples/hello.txt hello-copy.txt && echo identical
+   ```
+   Without `-o`, `-d` uses the original name from the header. It never overwrites an existing file.
+6. **The benchmark mode** sends random Data Blocks instead of a file:
    ```
    ./encclient -s 2097152
    ```
-   Expected output (your times will differ):
-   ```
-   encclient: sent 2097152 bytes, waiting for the reply...
-   encserver: job 2097152 bytes, 16 segments, 9.8 ms, ok
-   encclient: main thread stayed free for 2 ticks of 5 ms while waiting
-   encclient: run 1: 4 workers, 16 segments, encryption 9.812 ms, round trip 14.203 ms, verified
-   ```
    The word **verified** means the result equals the Reference Encryption and decrypts back to the original data.
-5. **Encrypt a real file.** The output file holds the 16-byte IV followed by the Encrypted Block:
-   ```
-   ./encclient -f /etc/passwd -o passwd.enc
-   ```
-6. **Show several Jobs at once.** Start three clients together and watch the server log interleave:
-   ```
-   ./encclient -s 2097152 -n 20 & ./encclient -s 2097152 -n 20 & ./encclient -s 100000 -n 20 & wait
-   ```
 7. **Stop the server:** `kill %1` (or `slay encserver`).
 
 ---
 
-## Part 7: Benchmark (on the Pi)
+## Part 7: The demo (on the Pi)
 
-1. Make sure no `encserver` is running: run `slay encserver`. An error saying none was found is fine.
+Use **two SSH windows** side by side, both logged in to the Pi (Part 3):
+
+| Left window: the server | Right window: the demo |
+|---|---|
+| `cd /var/encsvc` | `cd /var/encsvc` |
+| `./encserver -v` | `./demo.sh` |
+
+Keep the server in the **foreground** in the left window, so its live log stays there and never mixes into the demo output. `demo.sh` waits until the server is up, then runs these steps. Press Enter between steps.
+
+| Step | What it shows | Watch in the left window |
+|---|---|---|
+| 0 | Key file, example files, output folder, server running | |
+| 1 | `hello.txt`: encrypt, the readable header, the first bytes before and after, decrypt, `identical ✔` | 1 Job; small files are one Segment |
+| 2 | Every file in `examples/` (text, CSV, JSON, PDF, PNG, WAV) in one table: size, Data Blocks, times, `✔` | one Job per file; bigger files use more workers |
+| 3 | A 12 MB file: 6 Data Blocks, 4 in flight at once, then decrypt and compare | several `→ received` lines before the first `✔`: Jobs overlap |
+| 4 | Three clients at the same time | three different pids interleaved |
+| 5 | Worker Pool scaling: 1, 2, 4 and 8 workers, with the speedup | the script asks you to **stop the left server (Ctrl-C)**; it runs its own |
+
+- `./demo.sh 3` runs only step 3. `./demo.sh -y` runs everything without pausing.
+- Output files go to `/var/encsvc/demo-out`. To open the decrypted image or PDF on the PC:
+  ```
+  scp -o MACs=hmac-sha2-256 qnxuser@10.0.0.1:/var/encsvc/demo-out/qnx-pi.png .
+  ```
+- After step 5, start `./encserver -v` again in the left window if you want to repeat a step.
+- If the symbols `✔ █ →` show as odd characters, run `export ENC_ASCII=1` in **both** windows first. `NO_COLOR=1` turns colours off too.
+
+---
+
+## Part 8: Benchmark (on the Pi)
+
+1. Stop any `encserver` you started yourself (Ctrl-C in its window, or `slay encserver`). `bench.sh` starts its own servers.
 2. Run the benchmark:
    ```
    ./bench.sh
    ```
-   - This runs 1, 2, 4 and 8 workers, with 200 runs of a 2 MB Data Block each, and writes `results.csv`.
-   - After each worker count, the client prints a summary line such as `encryption mean … ms`.
+   - This runs 1, 2, 4 and 8 workers, with 200 runs of a 2 MB Data Block each, and writes `results.csv` (one row per run).
+   - At the end it prints a table: mean encryption time, mean round trip, **speedup** over 1 worker, and MB/s.
    - Other sizes and run counts: `./bench.sh <bytes> <runs>`, for example `./bench.sh 1048576 100`.
 3. Copy the results to the lab PC. Run this **on the PC**:
    ```
-   scp -o MACs=hmac-sha2-256 qnxuser@qnxpi.local:encsvc/results.csv .
+   scp -o MACs=hmac-sha2-256 qnxuser@10.0.0.1:/var/encsvc/results.csv .
    ```
 4. Make the chart in Excel:
    - **Insert → PivotTable**. Put `workers` in Rows and **Average** of `encryption_us` and `round_trip_us` in Values.
@@ -192,9 +225,11 @@ Tips for steady numbers:
 2. Rebuild (Part 4) and copy both programs again (Part 5).
 3. Run `./bench.sh 16777216 100`.
 
+Encrypted Files record their Data Block size in the header, so files made before the change still decrypt.
+
 ---
 
-## Part 8: Troubleshooting
+## Part 9: Troubleshooting
 
 | Symptom | Fix |
 |---|---|
@@ -202,10 +237,15 @@ Tips for steady numbers:
 | `openssl/evp.h: No such file or directory` | Install the OpenSSL package (Part 1), or build with `make clean` and then `make CRYPTO=builtin`. |
 | On the Pi: `Could not load library libcrypto.so.3` | Rebuild with `make CRYPTO=builtin` and copy the programs again. This version needs no extra libraries. |
 | `encserver: name_attach: Operation not permitted` | Run the server as root: `su`, password `root`. |
-| `encclient: name_open("encsvc") … is encserver running?` | Start `./encserver &` first, and wait for its `ready` line. |
+| `encclient: ✖ cannot reach "encsvc"… Is encserver running?` | Start `./encserver -v` first (in the other window), and wait for its `encserver ready` banner. |
+| `encserver: another encserver is already running` | One is running already: use it, or stop it with `slay encserver`. |
+| `-d`: `… already exists; delete it or choose another name with -o` | Decryption never overwrites a file. Delete the old file or add `-o newname`. |
+| `-d`: `… is not an Encrypted File` or `… is damaged` | The file has no `QNX-ENC v1` header, or it was cut short (for example an interrupted `scp`). Encrypt the original again. |
+| `demo.sh` waits forever for encserver | Start `./encserver -v` in the other window, in the same folder as `demo.sh`. |
+| Odd characters instead of `✔ █ →` | `export ENC_ASCII=1` in both windows. |
 | `ssh`: `no matching MAC found` | Add `-o MACs=hmac-sha2-256` (Windows OpenSSH). |
 | `qnxpi.local` not found | Use the IP address shown by `ifconfig` on the Pi (Part 3). |
-| `./bench.sh: Permission denied` | `chmod +x bench.sh encserver encclient` |
-| `bad interpreter` or `$'\r': command not found` | `bench.sh` was saved with Windows line endings. On the Pi run `tr -d '\r' < bench.sh > b.sh && mv b.sh bench.sh && chmod +x bench.sh`. |
+| `./bench.sh: Permission denied` (or `demo.sh`) | `chmod +x encserver encclient demo.sh bench.sh` |
+| `bad interpreter` or `$'\r': command not found` | A script was saved with Windows line endings. On the Pi, for each of `demo.sh`, `bench.sh` and `lib.sh`: `tr -d '\r' < demo.sh > x.sh && mv x.sh demo.sh`, then `chmod +x demo.sh bench.sh`. |
 | `cipher self-test FAILED` | Stop here. The cipher library is broken on this target. Try `make CRYPTO=builtin`, and report which backend failed. |
 | `result differs from Reference Encryption` | This is a real bug. Keep the full output and the command line you used. |

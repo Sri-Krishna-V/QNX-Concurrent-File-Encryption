@@ -7,12 +7,16 @@ A QNX server that receives a Data Block from a client, encrypts its Segments in 
 ### Data
 
 **Data Block**:
-The bytes a client submits for encryption in one request, at most 2 MB. The client may read it from a file, but the server never sees files.
+The bytes a client submits for encryption in one request, at most 2 MB. The server never sees files: the client sends a file as a sequence of Data Blocks.
 _Avoid_: File, payload, message
 
 **Encrypted Block**:
 The bytes the server returns for one Data Block, the same length as the Data Block.
 _Avoid_: Ciphertext buffer, output, result
+
+**Encrypted File**:
+What the client writes after encrypting a file: a short readable header, then the Encrypted Blocks of all the file's Data Blocks. The client can turn it back into the original file.
+_Avoid_: Ciphertext file, output file, .enc
 
 **Segment**:
 A contiguous, independently encryptable slice of a Data Block. A Data Block of 64 KB or less is a single Segment.

@@ -2,6 +2,8 @@
 
 A client sends a **Data Block** (up to 2 MB) to a QNX server. The server encrypts the block's **Segments** in parallel on a **Worker Pool**, uses a mutex to protect the shared output, signals completion with a condition variable, and returns the **Encrypted Block** asynchronously. The terms in bold are defined in [`CONTEXT.md`](../CONTEXT.md).
 
+To encrypt a whole file, the client cuts it into Data Blocks, sends several at once, and writes an **Encrypted File**: a readable header followed by the encrypted bytes. Section 8 covers files.
+
 - Target: QNX SDP 8.0.3 on a Raspberry Pi 4B (4 × Cortex-A72, no AES hardware instructions).
 - Cipher: AES-256-CTR.
 
@@ -83,6 +85,7 @@ STRUCT Job
     key, iv, input, len, total_segments      // read-only while the Job runs
     output, completed_count, error           // shared: guarded by mutex
     finish_time                              // set by the worker that completes the last Segment
+    worker_segments[]                        // Segments done by each worker, for the server log
     mutex, done_cv
 
 STRUCT WorkerPool
@@ -229,6 +232,7 @@ VERIFY: encrypted = ReferenceEncryption(data) AND decrypt(encrypted) = data
 | Parallel = serial | Every Job in the tests is compared with the Reference Encryption, across 1–8 workers and sizes from 1 B to 2 MB. |
 | No data races | `make tsan` runs every test under ThreadSanitizer. |
 | Server logic | `test_e2e` runs the real `server.c` and `client.c` together on an in-process message-passing stand-in. It covers 16 clients at once, the Job cap, and every error reply. |
+| Files | `test_e2e` encrypts and decrypts files through the real client: empty, 1 byte, exactly one Data Block, 3 Data Blocks with 1 and with 8 in flight. It checks the readable header, that `-d` never overwrites a file, and that it rejects plain and cut-short files. |
 | On the Pi | `encclient` always verifies run 1, and with `-V` it verifies every run. |
 
 ---
@@ -238,6 +242,43 @@ VERIFY: encrypted = ReferenceEncryption(data) AND decrypt(encrypted) = data
 - **Encryption Time**: measured by the server, from the first Task queued to the last Task finished. It is returned in the reply.
 - **Round-Trip Time**: measured by the client, from `MsgSendv` to the reply. It includes both message copies.
 
-`scripts/bench.sh` runs 1, 2, 4 and 8 workers, with 5 warm-up runs and 200 measured runs each, and writes `results.csv`. On the Pi 4B, software AES runs at roughly 50–100 MB/s per core. So a 2 MB Data Block takes tens of milliseconds on one worker, much longer than the threading overhead, and the speedup up to 4 workers should be clear. The 8-worker run shows what happens with more workers than cores.
+`scripts/bench.sh` runs 1, 2, 4 and 8 workers, with 5 warm-up runs and 200 measured runs each, and writes `results.csv`. On the Pi 4B the bundled AES runs at roughly 10 MB/s per core (measured: a 2 MB Data Block in about 50 ms on 4 workers). So a 2 MB Data Block takes around 200 ms on one worker, much longer than the threading overhead, and the speedup up to 4 workers should be clear. The 8-worker run shows what happens with more workers than cores.
 
 To benchmark larger Data Blocks later, raise `ENC_MAX_BLOCK` in `src/core/config.h` and rebuild.
+
+---
+
+## 8. Files
+
+The server never sees files. A file is only a sequence of Data Blocks, so everything above applies to each of them unchanged.
+
+**Encrypting (`encclient -e`):**
+
+```
+file ──split──► Data Block 1   Data Block 2   ...   Data Block n      (2 MB each, last one shorter)
+                     │              │                    │
+          sender threads (-j, default 4): each takes the next Data Block,
+          MsgSendv to encserver, then writes its Encrypted Block into place
+                     │              │                    │
+Encrypted File:  [ readable header with one IV per block | encrypted bytes, same length as the file ]
+```
+
+- Several Data Blocks are in flight at once, so the server runs several Jobs together on one Worker Pool. With 4 in flight on 4 cores every Job keeps the workers busy.
+- Each sender thread takes the next block number under a mutex. The main thread waits on a condition variable and redraws the progress bar each time a block comes back.
+- Every Data Block gets its own random IV from the server. The IVs are known only after the replies, so the client writes the encrypted bytes first, at their final offsets, and the header last. The header's length does not depend on the IV values, so the offsets are known from the start.
+
+**The Encrypted File** is meant to be read by people too (`head -n 6 hello.txt.enc`):
+
+```
+QNX-ENC v1
+name    hello.txt
+size    397 bytes
+blocks  1 of up to 2097152 bytes
+iv 1    02d96ed12ec2d1706ebe75bc5a27fc23
+---
+<encrypted bytes: exactly 397 of them>
+```
+
+**Decrypting (`encclient -d`)** runs on the client with the shared key, one Data Block at a time: CTR decryption is the same operation as encryption. It never overwrites an existing file, and it rejects a file without the header or one that is shorter than its header says. There is no integrity check, so a wrong key or a changed byte gives wrong output. See [ADR 0002](adr/0002-encrypted-file-without-integrity-check.md).
+
+**Live server log (`encserver -v`):** one line when a Job arrives and one when it is done. The done line shows how many Segments each worker encrypted. A worker knows its own index through a thread-local variable set when the pool starts it (`pool_current_worker()`), and `commit_segment` counts per worker under the Job mutex it already holds.
