@@ -1,0 +1,10 @@
+Hello from QNX on the Raspberry Pi 4B!
+
+This short note is a plain text file. encclient splits it into Data Blocks,
+encserver encrypts them with AES-256-CTR on its Worker Pool, and the result
+is an Encrypted File: a readable header followed by encrypted bytes.
+
+Decrypt it again with:   ./encclient -d hello.txt.enc
+and you get this exact text back, byte for byte.
+
+Team: 7th semester QNX project
