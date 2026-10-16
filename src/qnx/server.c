@@ -204,6 +204,7 @@ static void finish_job(server_job_t *sj, int err)
 {
     bool gone;
     int why = ESRCH;
+    const char *what = "client gone, Encrypted Block discarded";
 
     /* Log first: once done is set, the Receive Thread may hand the Job out and free it. */
     if (err != 0) {
@@ -219,6 +220,9 @@ static void finish_job(server_job_t *sj, int err)
     if (!gone && MsgDeliverEvent(sj->rcvid, &sj->event) == -1) {
         why = errno;                /* normally ESRCH: the client went away after ENCRYPT */
         gone = true;
+        if (why != ESRCH && why != EBADF && why != ENXIO) {
+            what = "cannot deliver the event, Encrypted Block discarded";   /* e.g. EACCES */
+        }
     }
     if (gone) {
         unlink_job_locked(sj);
@@ -227,7 +231,7 @@ static void finish_job(server_job_t *sj, int err)
 
     if (gone) {
         /* Abandoned Job: logged even without -v, the Encrypted Block is discarded. */
-        log_failed(sj->id, sj->client_pid, sj->job.len, "client gone, Encrypted Block discarded", why);
+        log_failed(sj->id, sj->client_pid, sj->job.len, what, why);
         server_job_free(sj);
         admit_waiting();
     }
@@ -295,9 +299,9 @@ static void admit(const waiting_t *w)
     sj->scoid = w->scoid;
     sj->rcvid = w->rcvid;
     /*
-     * Kept as received, not inspected: the client registered it with
-     * MsgRegisterEvent(), and registration may change its fields. The kernel
-     * checks a registered event when we deliver it.
+     * Kept as received, not inspected: MsgRegisterEvent() replaced the
+     * client's event with a handle, which only the kernel can resolve when we
+     * deliver it.
      */
     sj->event = w->request.event;
 
