@@ -2,6 +2,37 @@
 
 A QNX server that receives a Data Block from a client, encrypts its Segments in parallel, and replies with the Encrypted Block. It exists to demonstrate safe, measurable concurrency on QNX.
 
+How the terms below relate to each other (colours follow the sections: grey Data, green Processing, amber Notification, blue Verification and Measurement):
+
+```mermaid
+flowchart TB
+    FILE["File<br/>(not a server term)"] -- "client cuts into" --> DB["Data Block<br/>at most 2 MB"]
+    DB -- "server handles as one" --> JOB["Job<br/>holds 1 of 8 slots"]
+    JOB -- "split into" --> SEG["Segments"]
+    SEG -- "one Task each" --> TASK["Task"]
+    TASK -- "carried out by" --> WP["Worker Pool"]
+    WP -- "fills" --> EB["Encrypted Block<br/>same length as the Data Block"]
+    JOB -. "when done, server delivers" .-> EVT["Event<br/>a pulse"]
+    EVT -- "client then sends" --> FETCH["Fetch"]
+    FETCH -- "returns" --> EB
+    EB -- "client writes, with a header" --> EF["Encrypted File"]
+    JOB -. "client went away" .-> AJ["Abandoned Job"]
+    REF["Reference Encryption<br/>one thread, no Segments"] -. "must equal" .-> EB
+    JOB -. "server measures" .-> ET["Encryption Time"]
+    FETCH -. "client measures, from the Data Block on" .-> RTT["Round-Trip Time"]
+
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef proc fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef note fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef check fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef warn fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+    class FILE,DB,EB,EF,SEG data
+    class JOB,TASK,WP proc
+    class EVT,FETCH note
+    class REF,ET,RTT check
+    class AJ warn
+```
+
 ## Language
 
 ### Data

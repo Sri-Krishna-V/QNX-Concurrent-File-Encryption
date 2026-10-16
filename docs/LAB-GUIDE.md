@@ -4,6 +4,46 @@ This guide takes you from a lab PC with QNX SDP 8.0.3 and Momentics to the live 
 
 Commands in `this style` run on the **lab PC** unless the step says **on the Pi**.
 
+```mermaid
+flowchart TB
+    subgraph PCPREP["Lab PC"]
+        direction LR
+        P0["Part 0<br/>what you need"] --> P1["Part 1<br/>check the lab PC"]
+    end
+    subgraph PIPREP["The Pi"]
+        direction LR
+        Q{"Does the Pi<br/>boot QNX 8.0?"} -- "no" --> P2["Part 2<br/>SD card"] --> P3["Part 3<br/>boot, log in"]
+        Q -- "yes" --> P3
+    end
+    subgraph BUILD["Lab PC"]
+        direction LR
+        P4["Part 4<br/>build"] --> P5["Part 5<br/>copy to the Pi"]
+    end
+    subgraph RUN["On the Pi"]
+        direction LR
+        P6["Part 6<br/>first run"] --> P7["Part 7<br/>the demo"] --> P8["Part 8<br/>benchmark"]
+    end
+    PCPREP --> PIPREP --> BUILD --> RUN
+    P9["Part 9<br/>troubleshooting"] -.-> RUN
+
+    classDef pc fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
+    classDef pi fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef ask fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef run fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef help fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+    class P0,P1,P2,P4,P5 pc
+    class P3 pi
+    class Q ask
+    class P6,P7,P8 run
+    class P9 help
+    style PCPREP fill:#0d94881a,stroke:#0d9488,color:#0d9488
+    style PIPREP fill:#7c3aed1a,stroke:#7c3aed,color:#7c3aed
+    style BUILD fill:#0d94881a,stroke:#0d9488,color:#0d9488
+    style RUN fill:#16a34a1a,stroke:#16a34a,color:#16a34a
+```
+
+Teal parts happen on the lab PC, purple and green ones on the Pi.
+
 ---
 
 ## Part 0: What you need
@@ -67,6 +107,23 @@ Commands in `this style` run on the **lab PC** unless the step says **on the Pi*
    - Windows OpenSSH needs the `-o MACs=hmac-sha2-256` option. On Linux you can leave it out.
    - **If `qnxpi.local` is not found:** log in on the Pi's own screen (user `qnxuser`, password `qnxuser`), run `ifconfig`, note the IPv4 address, and use it instead of `qnxpi.local` everywhere in this guide.
    - In our lab the Pi is at **10.0.0.1**: `ssh -o MACs=hmac-sha2-256 qnxuser@10.0.0.1`. The rest of this guide uses that address.
+
+   ```mermaid
+   flowchart LR
+       PC["Lab PC<br/>Windows OpenSSH<br/>ssh, scp"] -- "Ethernet<br/>ssh -o MACs=hmac-sha2-256" --> PI["Raspberry Pi 4B<br/>QNX 8.0<br/>10.0.0.1 or qnxpi.local"]
+       PI --> HOME["/var/encsvc<br/>programs, scripts,<br/>examples, enc.key"]
+       USER["log in as qnxuser<br/>su for root"] -.-> PI
+
+       classDef pc fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
+       classDef pi fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+       classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+       classDef note fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+       class PC pc
+       class PI pi
+       class HOME data
+       class USER note
+   ```
+
 4. The accounts are:
 
    | User | Password | Note |
@@ -77,6 +134,27 @@ Commands in `this style` run on the **lab PC** unless the step says **on the Pi*
 ---
 
 ## Part 4: Build on the lab PC
+
+```mermaid
+flowchart TB
+    ENV["qnxsdp-env.bat<br/>(Part 1)"] --> HOW{"Command line<br/>or Momentics?"}
+    HOW -- "Option A" --> SSL{"OpenSSL for QNX<br/>installed?"}
+    HOW -- "Option B" --> IDE["Momentics:<br/>Makefile Project with Existing Code"] --> SSL
+    SSL -- "yes" --> MK1["make"]
+    SSL -- "no, or the lab Pi" --> MK2["make CRYPTO=builtin"]
+    MK1 --> OUT["bin/aarch64le/<br/>encserver, encclient"]
+    MK2 --> OUT
+    OUT --> NEXT["Part 5: copy to the Pi"]
+
+    classDef pc fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
+    classDef ask fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef build fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    class ENV,IDE,NEXT pc
+    class HOW,SSL ask
+    class MK1,MK2 build
+    class OUT data
+```
 
 ### Option A: command line (recommended)
 
@@ -218,6 +296,25 @@ Keep the server in the **foreground** in the left window, so its live log stays 
    - **Insert → PivotTable**. Put `workers` in Rows and **Average** of `encryption_us` and `round_trip_us` in Values.
    - **Speedup for N workers** = average with 1 worker ÷ average with N workers. Expect it to rise up to 4 workers (the Pi has 4 cores) and level off at 8.
    - `round_trip_us` is always larger than `encryption_us`. The difference is the cost of copying the Data Block and the Encrypted Block through the kernel, plus the event and the second message (FETCH) that bring the Encrypted Block back.
+
+From the Pi to the chart:
+
+```mermaid
+flowchart LR
+    B["./bench.sh<br/>on the Pi"] --> CSV[("results.csv<br/>workers, bytes, segments, run,<br/>encryption_us, round_trip_us, verified")]
+    B --> T["speedup table<br/>in the terminal"]
+    CSV -- "scp to the PC" --> XL["Excel<br/>PivotTable: workers in Rows,<br/>Average of the two times"]
+    XL --> CH["chart<br/>speedup = mean with 1 worker / mean with N"]
+
+    classDef pi fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef pc fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
+    classDef out fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    class B,T pi
+    class CSV data
+    class XL pc
+    class CH out
+```
 
 Tips for steady numbers:
 - Run the benchmark twice, and use the second run.

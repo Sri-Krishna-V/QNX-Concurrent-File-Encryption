@@ -8,6 +8,30 @@ The course requires that the server answers asynchronously **through an event**,
 2. **Event.** When the Job is done, the Job Coordinator calls `MsgDeliverEvent()` with the client's event. The pulse arrives on a private channel owned by the client's sender thread, which waits for it with `MsgReceivePulse()`.
 3. **FETCH.** The client sends the Job id, and the server replies with `MsgReplyv([result header | Encrypted Block])`.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    box rgba(37,99,235,0.12) encclient
+        participant S as Sender thread
+    end
+    box rgba(124,58,237,0.12) encserver
+        participant R as Receive Thread
+        participant J as Job Coordinator
+    end
+    rect rgba(37,99,235,0.10)
+        S->>R: ENCRYPT: MsgSendv [header + registered event | Data Block]
+        R-->>S: MsgReply [Job id], at once
+    end
+    R->>J: start the Job
+    rect rgba(217,119,6,0.14)
+        J-)S: Event: MsgDeliverEvent, a pulse on the sender's own channel
+    end
+    rect rgba(124,58,237,0.10)
+        S->>R: FETCH: MsgSendv [Job id]
+        R-->>S: MsgReplyv [result header | Encrypted Block]
+    end
+```
+
 Every blocking call on the client is preceded by `TimerTimeout()`, with one deadline of 10 s for the whole exchange. The client reaches the server only through `name_open()`. Its one `ConnectAttach()` is to its **own** channel, because a pulse needs a connection to travel on.
 
 ## Considered Options

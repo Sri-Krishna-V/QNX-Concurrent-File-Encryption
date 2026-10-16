@@ -7,6 +7,36 @@ This guide is for you if you did not write this code. You need no C or QNX knowl
 - Part 7 is a checklist with **every** feature, one at a time.
 - Part 9 helps when something goes wrong.
 
+```mermaid
+flowchart TB
+    subgraph PC["On the lab PC"]
+        direction LR
+        P1["Part 1<br/>get the newest code"] --> P2["Part 2<br/>build the programs"] --> P3["Part 3<br/>copy them to the Pi"]
+    end
+    subgraph PI["On the Pi, over SSH: set up"]
+        direction LR
+        P4["Part 4<br/>open two windows"] --> P5["Part 5<br/>one-time set-up"]
+    end
+    subgraph TRY["On the Pi: try it"]
+        direction LR
+        P6["Part 6<br/>guided demo"] --> P7["Part 7<br/>every feature"] --> P8["Part 8<br/>stop, clean up"]
+    end
+    PC --> PI --> TRY
+    P9["Part 9<br/>when something goes wrong"] -.-> TRY
+
+    classDef pc fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
+    classDef pi fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef demo fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef help fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+    class P1,P2,P3 pc
+    class P4,P5,P8 pi
+    class P6,P7 demo
+    class P9 help
+    style PC fill:#0d94881a,stroke:#0d9488,color:#0d9488
+    style PI fill:#7c3aed1a,stroke:#7c3aed,color:#7c3aed
+    style TRY fill:#16a34a1a,stroke:#16a34a,color:#16a34a
+```
+
 [LAB-GUIDE.md](LAB-GUIDE.md) has the deeper details (preparing the SD card, Momentics, Excel charts). You only need it if this guide sends you there.
 
 **Prefer clicking?** `dashboard\launch_dashboard.bat` does Parts 2 to 8 for you from the PC, one button per step, and opens command-prompt windows that show the same output as the two Pi windows below. See [dashboard/README.md](../dashboard/README.md). This guide is still the way to learn what each command does.
@@ -14,6 +44,40 @@ This guide is for you if you did not write this code. You need no C or QNX knowl
 ---
 
 ## 1. What the project does
+
+The life of one file, from `photo.png` to `photo.png.enc` and back:
+
+```mermaid
+flowchart TB
+    subgraph ENC["Encrypt: encclient -e"]
+        direction LR
+        A["photo.png<br/>any file"] --> B["encclient<br/>cuts it into<br/>Data Blocks of<br/>at most 2 MB"]
+        B -- "up to 4 at once" --> C["encserver<br/>Worker Pool<br/>w0 w1 w2 w3<br/>encrypts Segments<br/>together"]
+    end
+    subgraph WR["encclient writes the result"]
+        direction LR
+        D["encclient<br/>writes the header<br/>and the bytes"] --> E["photo.png.enc"]
+    end
+    subgraph DEC["Decrypt: encclient -d"]
+        direction LR
+        F["encclient alone<br/>with the same enc.key"] --> G["photo2.png<br/>identical to photo.png"]
+    end
+    ENC -- "Encrypted Blocks" --> WR --> DEC
+
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef server fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef good fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    class A,E data
+    class B,D,F client
+    class C server
+    class G good
+    style ENC fill:#2563eb1a,stroke:#2563eb,color:#2563eb
+    style WR fill:#2563eb1a,stroke:#2563eb,color:#2563eb
+    style DEC fill:#16a34a1a,stroke:#16a34a,color:#16a34a
+```
+
+The same picture as text:
 
 ```text
         encclient                                        encserver
@@ -150,6 +214,32 @@ Open **two new Command Prompt windows** (they do not need the QNX tools). Put th
 - **Left window = the server.**
 - **Right window = the client**, where you type almost everything.
 
+```mermaid
+flowchart LR
+    subgraph PC["Lab PC screen"]
+        direction LR
+        LW["Left window<br/>./encserver -v<br/>prints a line per Job"]
+        RW["Right window<br/>./encclient, ./demo.sh<br/>you type here"]
+    end
+    subgraph PI["Pi, in /var/encsvc"]
+        direction LR
+        SRV["encserver<br/>keeps running"]
+        CLI["encclient<br/>one run per command"]
+        CLI -- "Data Blocks" --> SRV
+    end
+    LW -- "ssh qnxuser#64;10.0.0.1" --> SRV
+    RW -- "ssh qnxuser#64;10.0.0.1" --> CLI
+
+    classDef pc fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
+    classDef server fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    class LW,RW pc
+    class SRV server
+    class CLI client
+    style PC fill:#0d94881a,stroke:#0d9488,color:#0d9488
+    style PI fill:#7c3aed1a,stroke:#7c3aed,color:#7c3aed
+```
+
 In **both** windows (Pi login, from the PC):
 
 ```bat
@@ -231,6 +321,37 @@ The server now waits. Leave this window alone; it prints a line whenever work ar
 ```
 
 Press **Enter** to go to the next step. Watch both windows:
+
+```mermaid
+flowchart TB
+    subgraph FILES["Files"]
+        direction LR
+        S0["Step 0<br/>check the set-up"] --> S1["Step 1<br/>a text file,<br/>step by step"] --> S2["Step 2<br/>every example file"]
+    end
+    subgraph CONC["Concurrency"]
+        direction LR
+        S3["Step 3<br/>12 MB file,<br/>4 Data Blocks at once"] --> S4["Step 4<br/>three clients<br/>at the same time"]
+    end
+    subgraph SCALE["Scaling"]
+        direction LR
+        CC["you press Ctrl+C<br/>in the left window"] --> S5["Step 5<br/>1, 2, 4, 8 workers,<br/>speedup table"]
+    end
+    FILES --> CONC --> SCALE
+
+    classDef check fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef file fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef conc fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef you fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+    classDef bench fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    class S0 check
+    class S1,S2 file
+    class S3,S4 conc
+    class CC you
+    class S5 bench
+    style FILES fill:#2563eb1a,stroke:#2563eb,color:#2563eb
+    style CONC fill:#16a34a1a,stroke:#16a34a,color:#16a34a
+    style SCALE fill:#d977061a,stroke:#d97706,color:#d97706
+```
 
 | Step | Right window (demo) | Left window (server) |
 |---|---|---|
@@ -586,6 +707,29 @@ Each command below must **fail** with the message shown. That is the feature: th
 ---
 
 ## Part 9: When something goes wrong
+
+Start at the top and follow the first answer that fits. The table below has the exact messages.
+
+```mermaid
+flowchart TB
+    A{"Can you log in?<br/>ssh to 10.0.0.1<br/>as qnxuser"} -- "no" --> A1["Check the cable, ping 10.0.0.1,<br/>add -o MACs=hmac-sha2-256"]
+    A -- "yes" --> B{"In /var/encsvc,<br/>does ls show encclient?"}
+    B -- "no" --> B1["Do Part 3 again<br/>(copy to the Pi)"]
+    B -- "yes" --> C{"Does ./encclient<br/>show an -e line?"}
+    C -- "no" --> C1["Old programs on the Pi:<br/>Parts 1, 2 and 3 again"]
+    C -- "yes" --> D{"Is enc.key there?<br/>ls -l enc.key"}
+    D -- "no" --> D1["Part 5, step 4:<br/>make the key"]
+    D -- "yes" --> E{"Does the left window show<br/>encserver ready?"}
+    E -- "no" --> E1["Start ./encserver -v in the<br/>left window, use su if it says<br/>Operation not permitted"]
+    E -- "yes" --> F["Look up the exact message<br/>in the table below"]
+
+    classDef ask fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef fix fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef ok fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    class A,B,C,D,E ask
+    class A1,B1,C1,D1,E1 fix
+    class F ok
+```
 
 | What you see | What to do |
 |---|---|

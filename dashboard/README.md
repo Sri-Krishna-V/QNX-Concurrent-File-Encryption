@@ -5,17 +5,36 @@ shows the results. It does no encryption itself: it sends the Pi the same comman
 type by hand in [BEGINNER-GUIDE.md](../docs/BEGINNER-GUIDE.md), over SSH, and reads what they
 print. The page starts empty every time: every value on it comes from a step you ran.
 
-```text
-  browser tab                  dashboard backend (this PC)          Raspberry Pi 4B (QNX 8.0)
-  http://localhost:8080        backend\server.py                    qnxuser@10.0.0.1
- ┌──────────────────┐  click  ┌─────────────────────────┐ ssh, scp ┌──────────────────────────┐
- │ Workflow: steps  │ ──────▶ │ runs one step at a time │ ───────▶ │ /var/encsvc              │
- │ Analytics: charts│ ◀────── │ reads the output into   │ ◀─────── │   encserver, encclient,  │
- └──────────────────┘ results │ numbers                 │  output  │   lib.sh, examples       │
-                       (SSE)  └────────────┬────────────┘          └──────────────────────────┘
-                                           │ writes logs
-                                           ▼
-                              command-prompt windows: the output, as in an SSH window
+```mermaid
+flowchart TB
+    subgraph PC["This PC"]
+        direction LR
+        WEB["Browser tab<br/>localhost:8080<br/>Workflow + Analytics"]
+        BE["Dashboard backend<br/>backend/server.py<br/>runs one step at a time"]
+        LOGS[("dashboard/runs<br/>one folder per session")]
+        CON["Command-prompt windows<br/>activity, encserver log, Step N"]
+        WEB -- "click Run" --> BE
+        BE -- "results (SSE)" --> WEB
+        BE -- "writes logs" --> LOGS
+        LOGS -- "followed live" --> CON
+    end
+    subgraph PI["Raspberry Pi, 10.0.0.1"]
+        direction TB
+        DIR["/var/encsvc<br/>encserver, encclient,<br/>lib.sh, examples, enc.key"]
+        RAM["/dev/shmem/encdash<br/>files the steps make (RAM)"]
+    end
+    BE -- "ssh -tt, scp" --> DIR
+    DIR -- "output" --> BE
+    DIR --> RAM
+
+    classDef pc fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
+    classDef pi fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    class WEB,BE,CON pc
+    class DIR pi
+    class LOGS,RAM data
+    style PC fill:#0d94881a,stroke:#0d9488,color:#0d9488
+    style PI fill:#7c3aed1a,stroke:#7c3aed,color:#7c3aed
 ```
 
 The page shows **results** (facts, tables, charts). The command-prompt windows show the
@@ -104,6 +123,37 @@ A whole run takes about five minutes; step 9 takes the longest.
 | **Cancelled** | you cancelled it; run it again when you are ready |
 | greyed out, with a reason | locked, for example `run step 3 (Deploy to the Pi) first` or `encserver is not running; start it in step 5` |
 
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> Locked: a step it needs is not done
+    [*] --> Ready: everything it needs is done
+    Locked --> Ready: the needed steps are done
+    Ready --> Running: Run
+    Running --> Done: finished
+    Running --> Failed: error
+    Running --> Cancelled: Cancel
+    Done --> Running: Run again
+    Failed --> Running: Run again
+    Cancelled --> Running: Run again
+
+    state "Locked, greyed out" as Locked
+    state "Ready, shows its number" as Ready
+    state "Running, spinner" as Running
+    state "Done, with results" as Done
+
+    classDef lock fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef ready fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef run fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef ok fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef bad fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+    class Locked lock
+    class Ready ready
+    class Running run
+    class Done ok
+    class Failed,Cancelled bad
+```
+
 ---
 
 ## The ten steps
@@ -122,6 +172,49 @@ A whole run takes about five minutes; step 9 takes the longest.
 | 10 Stop and clean up | `slay encserver`, delete `/dev/shmem/encdash` | what was kept on the Pi |
 
 **When each step unlocks, and its options**
+
+An arrow means "unlocks". Steps 6, 7 and 8 also need encserver to be running at that moment.
+
+```mermaid
+flowchart TB
+    subgraph SU["Set up"]
+        direction LR
+        S1["1 Connect<br/>to the Pi"] --> S2["2 Build<br/>the programs"] --> S3["3 Deploy<br/>to the Pi"] --> S4["4 Prepare<br/>the key"]
+    end
+    subgraph RUN["Run"]
+        direction TB
+        S5["5 Start<br/>encserver"]
+        S6["6 Encrypt and<br/>decrypt files"]
+        S7["7 Large file,<br/>Jobs in parallel"]
+        S8["8 Several clients<br/>at once"]
+        S5 --> S6
+        S5 --> S7
+        S5 --> S8
+    end
+    subgraph MEAS["Measure"]
+        S9["9 Scaling benchmark<br/>stops the live encserver"]
+    end
+    subgraph FIN["Finish"]
+        S10["10 Stop and<br/>clean up"]
+    end
+    S4 --> S5
+    S4 --> S9
+    S1 -.-> S10
+    S9 -. "run 5 again to<br/>repeat 6 to 8" .-> S5
+
+    classDef setup fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
+    classDef run fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef meas fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef fin fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    class S1,S2,S3,S4 setup
+    class S5,S6,S7,S8 run
+    class S9 meas
+    class S10 fin
+    style SU fill:#0d94881a,stroke:#0d9488,color:#0d9488
+    style RUN fill:#7c3aed1a,stroke:#7c3aed,color:#7c3aed
+    style MEAS fill:#d977061a,stroke:#d97706,color:#d97706
+    style FIN fill:#64748b1a,stroke:#64748b,color:#64748b
+```
 
 | Step | Unlocks when | Options (default first) |
 |---|---|---|
@@ -157,6 +250,28 @@ Read that part to learn what the commands do:
 ## The Analytics tab
 
 Empty until a step has measured something; then it fills as you go.
+
+```mermaid
+flowchart LR
+    S5["Step 5<br/>live encserver"] --> LB["Load balance<br/>Segments per worker"]
+    S6["Step 6<br/>files"] --> LB
+    S7["Step 7<br/>large file"] --> LB
+    S8["Step 8<br/>several clients"] --> LB
+    S6 --> RT["File round-trips"]
+    S7 --> CC["Concurrency<br/>in flight, Round-Trip Time"]
+    S8 --> CC
+    S9["Step 9<br/>benchmark"] --> SC["Worker Pool scaling<br/>speedup, Encryption Time,<br/>throughput, results.csv"]
+    LB --> TILES["Tiles at the top"]
+    RT --> TILES
+    SC --> TILES
+
+    classDef step fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef panel fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef tiles fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    class S5,S6,S7,S8,S9 step
+    class LB,RT,CC,SC panel
+    class TILES tiles
+```
 
 | Panel | Filled by | Shows |
 |---|---|---|
@@ -230,6 +345,33 @@ Part 9 and [LAB-GUIDE.md](../docs/LAB-GUIDE.md) Part 9.
 ## How it works
 
 For whoever changes the dashboard.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Page (web/app.js)
+    participant B as Backend (steps.py)
+    participant Pi as Pi (sh over ssh -tt)
+    participant W as Console windows
+    rect rgba(13,148,136,0.12)
+        P->>B: POST /api/steps/roundtrip/run<br/>with the card's options
+        Note over B: locked? options offered?<br/>then start a thread
+        B-->>P: started
+        B-)P: SSE state: the step is running
+    end
+    rect rgba(124,58,237,0.12)
+        B->>Pi: copy the script to<br/>/dev/shmem/encdash-step.sh
+        B->>Pi: ssh -tt sh<br/>/dev/shmem/encdash-step.sh
+        loop every line the Pi prints
+            Pi-->>B: a line, with colours<br/>and progress bars
+            B->>W: append to the step log<br/>and activity.log
+        end
+    end
+    rect rgba(22,163,74,0.12)
+        Note over B: parsers.py turns<br/>the output into numbers
+        B-)P: SSE state: done, with<br/>facts, tables and charts
+    end
+```
 
 1. The page (`web/`) asks the backend for the list of steps (`GET /api/workflow`) and builds a
    card for each. It opens one Server-Sent Events stream (`GET /api/stream`) and redraws

@@ -4,6 +4,27 @@
 
 The brief asks for a single request-response cycle and an asynchronous return. So the server keeps the client's `rcvid` and replies only when the Job is complete, and the Job Coordinator thread sends that reply (`MsgReplyv`), not the Receive Thread. The Receive Thread never waits for a Job, so the server keeps accepting new requests. The client does the blocking `MsgSendv` on its own sender thread, and its main thread gets a condition-variable signal when the reply arrives.
 
+```mermaid
+sequenceDiagram
+    box rgba(37,99,235,0.12) encclient
+        participant S as Sender thread
+    end
+    box rgba(124,58,237,0.12) encserver
+        participant R as Receive Thread
+        participant J as Job Coordinator
+    end
+    S->>R: MsgSendv [header | Data Block]
+    Note over S: reply-blocked for the whole Job
+    R->>J: start the Job, keep the rcvid
+    Note over R: back to MsgReceive at once
+    rect rgba(22,163,74,0.12)
+        J->>J: the Worker Pool encrypts the Segments
+    end
+    J-->>S: MsgReplyv [result header | Encrypted Block], the deferred reply
+```
+
+Compare with the three steps of [ADR 0003](0003-event-notification.md), which replaced this.
+
 ## Considered Options
 
 - **Pulse notification, then a second request.** The server replies at once with a job ID, sends the client a pulse with `MsgDeliverEvent` when the Job is done, and the client then sends `GET_RESULT`. This way no client thread ever blocks. It was rejected because it needs two exchanges per Data Block, a result store with an expiry policy on the server, and a second message type, all against the single-cycle brief.

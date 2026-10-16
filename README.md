@@ -9,6 +9,37 @@ The code shows:
 - asynchronous completion with a pulse: the client registers it (`MsgRegisterEvent`), the server delivers it (`MsgDeliverEvent`), and the client waits for it with `MsgReceivePulse`,
 - a 10 s kernel timeout on the client (`TimerTimeout`), and disconnect and unblock pulses handled on the server.
 
+```mermaid
+flowchart TB
+    subgraph PC["Lab PC (Windows)"]
+        direction LR
+        SRC["Source code<br/>src/core + src/qnx"] --> QCC["qcc cross-compiler<br/>QNX SDP 8.0"]
+        DASH["Dashboard<br/>localhost:8080"]
+    end
+    subgraph PI["Raspberry Pi 4B, QNX 8.0, /var/encsvc"]
+        direction LR
+        CLI["encclient<br/>-e encrypt<br/>-d decrypt<br/>-s benchmark"]
+        SRV["encserver<br/>Receive Thread<br/>+ Worker Pool"]
+        KEY[("enc.key<br/>32 random bytes")]
+        CLI -- "step 1: ENCRYPT<br/>Data Block" --> SRV
+        SRV -. "step 2: Event<br/>pulse" .-> CLI
+        CLI -- "step 3: FETCH<br/>Encrypted Block" --> SRV
+        SRV --- KEY
+    end
+    PC -- "make deploy (scp), or the dashboard over ssh" --> PI
+
+    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef server fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef pc fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
+    class CLI client
+    class SRV server
+    class KEY data
+    class SRC,QCC,DASH pc
+    style PC fill:#0d94881a,stroke:#0d9488,color:#0d9488
+    style PI fill:#7c3aed1a,stroke:#7c3aed,color:#7c3aed
+```
+
 **New to the project?** Start with [docs/BEGINNER-GUIDE.md](docs/BEGINNER-GUIDE.md): copy-paste steps from the lab PC to the Pi, and a checklist that tries every feature.
 
 ## Documents
@@ -35,6 +66,50 @@ scripts/       demo.sh (guided demo), bench.sh (benchmark), lib.sh; all run on t
 examples/      real sample files for the demo: text, CSV, JSON, PDF, PNG, WAV
 bin/aarch64le/ build output for the Pi
 dashboard/     the workflow dashboard: runs every step on the Pi from this PC, shows the results
+```
+
+How the folders build into programs and tests:
+
+```mermaid
+flowchart TB
+    subgraph CORE["src/core, portable"]
+        direction TB
+        WP["worker_pool.c<br/>job.c, segment.c"]
+        CIPH["cipher_*.c<br/>aes256.c"]
+        SYNC["sync.c<br/>encfile.c"]
+    end
+    subgraph QNX["src/qnx, QNX only"]
+        direction TB
+        SERVER["server.c"]
+        CLIENT["client.c, client_file.c<br/>client_msg.c, protocol.h"]
+    end
+    subgraph BIN["bin/aarch64le"]
+        direction TB
+        ENCSERVER(["encserver"])
+        ENCCLIENT(["encclient"])
+    end
+    subgraph TESTS["tests, on Linux or WSL"]
+        direction TB
+        UNIT["test_cipher<br/>test_job"]
+        E2E["test_e2e<br/>qnx_shim.c"]
+        STUB["qnx_stub<br/>make qnx-syntax"]
+    end
+    CORE --> QNX
+    QNX -- "qcc" --> BIN
+    CORE -. "tested by" .-> TESTS
+
+    classDef core fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef qnx fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef bin fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef test fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    class WP,CIPH,SYNC core
+    class SERVER,CLIENT qnx
+    class ENCSERVER,ENCCLIENT bin
+    class UNIT,E2E,STUB test
+    style CORE fill:#16a34a1a,stroke:#16a34a,color:#16a34a
+    style QNX fill:#7c3aed1a,stroke:#7c3aed,color:#7c3aed
+    style BIN fill:#2563eb1a,stroke:#2563eb,color:#2563eb
+    style TESTS fill:#d977061a,stroke:#d97706,color:#d97706
 ```
 
 ## Dashboard

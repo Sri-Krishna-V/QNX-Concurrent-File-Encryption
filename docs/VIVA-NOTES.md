@@ -13,9 +13,52 @@ A preparation sheet for the team. Every answer here matches the code in this rep
 - Several clients, and several Data Blocks from one client, run at the same time. The server holds at most 8 **Jobs**, queues the rest, and cleans up after clients that die.
 - The client checks every result against a single-threaded **Reference Encryption** and by decrypting it. `bench.sh` shows the speedup for 1, 2, 4 and 8 workers.
 
+The same 60 seconds as one picture:
+
+```mermaid
+flowchart TB
+    C["encclient<br/>Data Block, at most 2 MB"] -- "step 1: ENCRYPT" --> R["Receive Thread<br/>at most 8 Jobs, rest queued"]
+    R --> J["Job Coordinator<br/>splits into Segments"]
+    J --> W["Worker Pool<br/>AES-256-CTR in parallel"]
+    W -- "mutex: copy into<br/>the shared output" --> O["Encrypted Block"]
+    O -- "condition variable:<br/>last worker signals" --> J
+    J -. "step 2: Event (pulse)" .-> C
+    C -- "step 3: Fetch" --> R
+    R -- "Encrypted Block" --> C
+    C --> V["verified against the<br/>Reference Encryption"]
+    T["TimerTimeout<br/>10 s"] -.-> C
+
+    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef server fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef coord fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef worker fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef kernel fill:#ffe4e6,stroke:#e11d48,stroke-width:2px,color:#881337
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    class C,V client
+    class R server
+    class J coord
+    class W worker
+    class T kernel
+    class O data
+```
+
 ---
 
 ## 2. Rubric and evidence
+
+Where the 40 marks are. Kernel primitives and the report together are half of them:
+
+```mermaid
+%%{init: {"themeVariables": {"pie1": "#2563eb", "pie2": "#7c3aed", "pie3": "#16a34a", "pie4": "#d97706", "pie5": "#e11d48", "pie6": "#0d9488", "pieOuterStrokeWidth": "2px"}}}%%
+pie showData
+    title Marks by area (40 in total)
+    "Kernel primitives" : 10
+    "Report content" : 7
+    "Computing" : 5
+    "Architecture, concurrency" : 5
+    "Topic, demo" : 5
+    "Viva, report format" : 8
+```
 
 | Criterion | Marks | What to show or say | Where to point |
 |---|---|---|---|
@@ -33,6 +76,45 @@ A preparation sheet for the team. Every answer here matches the code in this rep
 ---
 
 ## 3. Likely viva questions
+
+The questions by topic, with their numbers, for revision:
+
+```mermaid
+mindmap
+  root((Viva questions))
+    Cipher
+      1 why CTR is parallel
+      2 a new IV per Data Block
+      3 why no MAC
+      4 how correctness is checked
+    Messages, events, timeouts
+      5 deferred reply vs event
+      6 one Data Block end to end
+      7 MsgRegisterEvent
+      8 own channel, side channel
+      9 a channel per sender thread
+      10 TimerTimeout
+      11 timeout while waiting
+      12 why MsgRead
+    Server design and failures
+      13 a client dies
+      14 Receive Thread never blocks
+      15 at most 8 Jobs
+      16 FETCH from the same client
+      17 server threads
+    Concurrency
+      18 what each mutex protects
+      19 while loop around the wait
+      20 private memory for workers
+      21 sync.h and return values
+    Performance
+      22 speedup levels off at 4
+      23 Encryption vs Round-Trip Time
+      24 Segment size
+    Tests and tools
+      25 QNX code on a laptop
+      26 the dashboard
+```
 
 ### Cipher
 

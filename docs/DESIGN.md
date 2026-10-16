@@ -7,9 +7,66 @@ To encrypt a whole file, the client cuts it into Data Blocks, sends several at o
 - Target: QNX SDP 8.0.3 on a Raspberry Pi 4B (4 × Cortex-A72, no AES hardware instructions).
 - Cipher: AES-256-CTR.
 
+The diagrams use the same colours throughout: **blue** for the client, **purple** for the server's Receive Thread, **amber** for the Job Coordinator, **green** for the Worker Pool, **rose** for the QNX kernel, and **grey** for data.
+
 ---
 
 ## 1. Architecture
+
+```mermaid
+flowchart TB
+    subgraph C["encclient (client process)"]
+        MAIN["Main thread<br/>starts the senders,<br/>waits on done_cv,<br/>verifies the result"]
+        S1["Sender thread 1<br/>own channel +<br/>registered pulse"]
+        S2["Sender threads 2 ... N<br/>-j N Data Blocks<br/>in flight"]
+        MAIN --> S1
+        MAIN --> S2
+    end
+    MP["QNX kernel<br/>message passing<br/>MsgSendv, MsgRead,<br/>MsgReplyv"]
+    EV["QNX kernel<br/>pulse delivery<br/>MsgDeliverEvent"]
+    TT["QNX kernel<br/>TimerTimeout<br/>one 10 s deadline"]
+    subgraph S["encserver (server process)"]
+        RT["Receive Thread<br/>MsgReceive loop,<br/>never waits for a Job"]
+        FIFO["Wait FIFO<br/>at most 64"]
+        JT["Job table<br/>at most 8 Jobs<br/>jobs_mutex"]
+        JC["Job Coordinator<br/>one per Job,<br/>waits on done_cv"]
+        Q["Task queue<br/>queue_mutex +<br/>not_empty_cv"]
+        W["Worker Pool<br/>w0 ... w3"]
+        OUT["Encrypted Block<br/>job.mutex guards<br/>copy + count"]
+        RT -- "no free slot" --> FIFO
+        FIFO -- "slot freed" --> JT
+        RT -- "admit" --> JT
+        JT --> JC
+        JC -- "one Task<br/>per Segment" --> Q
+        Q --> W
+        W -- "copy under<br/>job.mutex" --> OUT
+        OUT -. "last Segment<br/>signals done_cv" .-> JC
+    end
+    S1 -- "ENCRYPT, FETCH" --> MP
+    S2 -- "ENCRYPT, FETCH" --> MP
+    MP --> RT
+    JC -- "Job done" --> EV
+    EV -. "pulse on the<br/>sender's own channel" .-> S1
+    TT -. "guards every<br/>blocking call" .-> S1
+
+    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef server fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef coord fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef worker fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef kernel fill:#ffe4e6,stroke:#e11d48,stroke-width:2px,color:#881337
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    class MAIN,S1,S2 client
+    class RT,FIFO,JT server
+    class JC coord
+    class Q,W worker
+    class MP,EV,TT kernel
+    class OUT data
+    style C fill:#2563eb1a,stroke:#2563eb,color:#2563eb
+    style S fill:#7c3aed1a,stroke:#7c3aed,color:#7c3aed
+```
+
+<details>
+<summary>Plain-text version of this diagram</summary>
 
 ```
  CLIENT PROCESS (encclient)                   SERVER PROCESS (encserver)
@@ -33,6 +90,8 @@ To encrypt a whole file, the client cuts it into Data Blocks, sends several at o
                                      │     count++, last one signals ───────────┘     │
                                      └────────────────────────────────────────────────┘
 ```
+
+</details>
 
 | Component | Responsibility | Code |
 |---|---|---|
@@ -78,6 +137,22 @@ else:
 
 A 2 MB Data Block on 4 workers gives 16 Segments of 128 KB.
 
+```mermaid
+flowchart TB
+    LEN["Data Block<br/>len bytes"] --> SMALL{"len at most<br/>64 KB?"}
+    SMALL -- "yes" --> ONE["one Segment<br/>one worker does it"]
+    SMALL -- "no" --> TARGET["target = ceil(len / (workers x 4))<br/>2 MB / 16 = 128 KB"]
+    TARGET --> SIZE["seg_size = max(16 KB, target)<br/>rounded up to 16 bytes"]
+    SIZE --> MANY["about 4 Segments per worker<br/>2 MB on 4 workers: 16 x 128 KB"]
+
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef coord fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef worker fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    class LEN data
+    class SMALL,TARGET,SIZE coord
+    class ONE,MANY worker
+```
+
 ---
 
 ## 3. Data structures
@@ -117,9 +192,99 @@ STRUCT Notify                       // one per client sender thread (src/qnx/cli
     event                           // the registered pulse, sent with every ENCRYPT
 ```
 
+The same structures, with who owns what and which lock guards it:
+
+```mermaid
+classDiagram
+    direction TB
+    class ServerState {
+        jobs : list of ServerJob
+        held : Job slots in use, max 8
+        wait_queue : FIFO of Waiting, max 64
+        jobs_mutex
+    }
+    class ServerJob {
+        id : quoted by FETCH
+        scoid, rcvid, client_pid
+        event : the client's registered pulse
+        done, abandoned, err
+    }
+    class Waiting {
+        rcvid, scoid, client_pid
+        request
+    }
+    class Job {
+        key, iv, input, len
+        total_segments
+        output, completed_count, error
+        finish_time, worker_segments
+        mutex, done_cv
+    }
+    class Task {
+        job
+        offset, length
+    }
+    class WorkerPool {
+        threads : N workers
+        queue : FIFO of Task
+        shutdown
+        queue_mutex, not_empty_cv
+    }
+    class Notify {
+        chid : private channel
+        self_coid : ConnectAttach to it
+        event : registered pulse
+    }
+    ServerState "1" o-- "0..8" ServerJob : jobs
+    ServerState "1" o-- "0..64" Waiting : wait queue
+    ServerJob "1" *-- "1" Job : contains
+    Job "1" *-- "1..*" Task : one per Segment
+    WorkerPool "1" o-- "0..*" Task : queued
+    Notify ..> ServerJob : event sent with ENCRYPT
+
+    style ServerState fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    style ServerJob fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    style Waiting fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    style Job fill:#fef3c7,stroke:#d97706,color:#78350f
+    style Task fill:#dcfce7,stroke:#16a34a,color:#14532d
+    style WorkerPool fill:#dcfce7,stroke:#16a34a,color:#14532d
+    style Notify fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+```
+
 ---
 
 ## 4. Pseudocode
+
+The path of one Job through 4.1 to 4.5, at a glance. Only two locks are involved: `queue_mutex` to take a Task, and `job.mutex` to hand the result back. The encryption itself runs with no lock held.
+
+```mermaid
+flowchart TB
+    DB["Data Block, e.g. 2 MB"] --> SPLIT["Job Coordinator splits it (4.2)<br/>16 Segments of 128 KB"]
+    SPLIT --> Q["Task queue (4.1)<br/>LOCK queue_mutex, ENQUEUE,<br/>SIGNAL not_empty_cv"]
+    Q --> W0["w0"]
+    Q --> W1["w1"]
+    Q --> W2["w2"]
+    Q --> W3["w3"]
+    W0 --> ENC["Encrypt the Segment (4.3)<br/>AES-256-CTR into a private buffer<br/>counter = IV + offset / 16<br/>no lock held"]
+    W1 --> ENC
+    W2 --> ENC
+    W3 --> ENC
+    ENC --> COMMIT["Commit (4.4)<br/>LOCK job.mutex<br/>copy into the Encrypted Block<br/>completed_count += 1, UNLOCK"]
+    COMMIT --> LAST{"completed_count =<br/>total_segments?"}
+    LAST -- "no: take the next Task" --> Q
+    LAST -- "yes: the last Segment" --> SIG["SIGNAL done_cv (4.5)"]
+    SIG --> WAKE["Coordinator wakes<br/>WHILE not all done: WAIT done_cv"]
+    WAKE --> EVT["MsgDeliverEvent to the client (4.6)"]
+
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef coord fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef worker fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef kernel fill:#ffe4e6,stroke:#e11d48,stroke-width:2px,color:#881337
+    class DB data
+    class SPLIT,SIG,WAKE coord
+    class Q,W0,W1,W2,W3,ENC,COMMIT,LAST worker
+    class EVT kernel
+```
 
 ### 4.1 Worker Pool creation
 
@@ -200,6 +365,45 @@ FUNCTION job_run(job, pool)                              // Job Coordinator thre
 ### 4.6 Asynchronous return of the Encrypted Block: ENCRYPT, event, FETCH
 
 All server state below (`jobs`, `held`, the wait queue, each ServerJob's `done` and `abandoned`) is guarded by `jobs_mutex`.
+
+The life of one ENCRYPT request on the server. Every state from Running until Slot freed, Abandoned included, holds one of the 8 Job slots:
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> Rejected: size 0 or above 2 MB, or 64 already waiting
+    [*] --> Waiting: all 8 slots taken
+    [*] --> Running: slot free, MsgRead, reply Job id
+    Waiting --> Running: a slot is freed, oldest first
+    Waiting --> Dropped: client timed out or disconnected
+    Running --> Done: last Segment, MsgDeliverEvent
+    Running --> Abandoned: client disconnected
+    Abandoned --> Freed: Tasks finish, result discarded
+    Done --> Fetched: FETCH from the same client
+    Done --> Freed: client disconnected
+    Fetched --> Freed: MsgReplyv the Encrypted Block
+    Rejected --> [*]
+    Dropped --> [*]
+    Freed --> [*]: admit the oldest waiting request
+
+    state "Waiting for a slot<br/>client reply-blocked" as Waiting
+    state "Running<br/>Worker Pool encrypts" as Running
+    state "Done, not fetched yet" as Done
+    state "Abandoned Job" as Abandoned
+    state "Fetched" as Fetched
+    state "Slot freed" as Freed
+    state "EINVAL, EMSGSIZE or EBUSY" as Rejected
+    state "ETIMEDOUT or dropped" as Dropped
+
+    classDef wait fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef slot fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef good fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef bad fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+    class Waiting wait
+    class Running,Done,Fetched slot
+    class Freed good
+    class Abandoned,Rejected,Dropped bad
+```
 
 ```
 // Server: Receive Thread. Never waits for a Job.
@@ -309,6 +513,52 @@ VERIFY: encrypted = ReferenceEncryption(data) AND decrypt(encrypted) = data
 
 ## 5. Communication flow
 
+```mermaid
+sequenceDiagram
+    autonumber
+    box rgba(37,99,235,0.12) encclient
+        participant M as Main thread
+        participant S as Sender thread
+    end
+    box rgba(124,58,237,0.12) encserver
+        participant R as Receive Thread
+        participant J as Job Coordinator
+        participant W as Worker Pool
+    end
+    M->>S: start one per<br/>Data Block in flight
+    Note over S: ChannelCreate,<br/>ConnectAttach to its<br/>own channel,<br/>MsgRegisterEvent
+    rect rgba(37,99,235,0.10)
+        Note over S,R: Step 1: ENCRYPT
+        S->>R: MsgSendv<br/>[header + event | Data Block]
+        Note over R: check the size,<br/>take a Job slot,<br/>MsgRead the Data Block,<br/>new random IV
+        R-->>S: MsgReply [Job id]<br/>at once
+    end
+    R->>J: start a Job Coordinator
+    Note over R: back to MsgReceive,<br/>free for other clients
+    rect rgba(22,163,74,0.12)
+        Note over J,W: Encrypt in parallel
+        J->>W: queue one Task per Segment
+        W-->>J: last Segment signals done_cv
+    end
+    rect rgba(217,119,6,0.14)
+        Note over S,J: Step 2: Event
+        J-)S: MsgDeliverEvent<br/>a pulse on the sender's own channel
+        Note over S: MsgReceivePulse returns
+    end
+    rect rgba(124,58,237,0.10)
+        Note over S,R: Step 3: FETCH
+        S->>R: MsgSendv [FETCH Job id]
+        R-->>S: MsgReplyv<br/>[result header | Encrypted Block]
+        Note over R: free the Job<br/>and its slot, admit the<br/>oldest waiting request
+    end
+    S->>M: signal done_cv
+    Note over M: verify against the<br/>Reference Encryption
+    Note over S,R: TimerTimeout before every blocking call:<br/>one 10 s deadline for steps 1 to 3
+```
+
+<details>
+<summary>Plain-text version of this diagram</summary>
+
 ```
  encclient (sender thread)                          encserver
         │  1. ENCRYPT  MsgSendv [header+event | Data Block]
@@ -322,6 +572,8 @@ VERIFY: encrypted = ReferenceEncryption(data) AND decrypt(encrypted) = data
         │◄──────────────────────────────────────────────  MsgReplyv [result header, Encrypted Block]
         │     10 s deadline: TimerTimeout on every blocking call
 ```
+
+</details>
 
 - The server starts, loads `enc.key`, runs the cipher self-test, starts N workers, and registers `encsvc` with `name_attach`.
 - The client loads the same `enc.key` and connects with `name_open("encsvc")`.
@@ -341,9 +593,82 @@ VERIFY: encrypted = ReferenceEncryption(data) AND decrypt(encrypted) = data
 - If no Encrypted Block arrives within 10 s, `TimerTimeout` unblocks the call and the client reports `no Encrypted Block within 10 s`.
 - If a client dies, the server gets a disconnect pulse and frees everything that client left behind.
 
+**When things go wrong.** The kernel tells the server about both cases with a pulse on its channel:
+
+```mermaid
+sequenceDiagram
+    box rgba(37,99,235,0.12) encclient
+        participant C as Sender thread
+    end
+    box rgba(225,29,72,0.12) QNX kernel
+        participant K as Kernel
+    end
+    box rgba(124,58,237,0.12) encserver
+        participant R as Receive Thread
+        participant J as Job Coordinator
+    end
+    alt All 8 Job slots taken, the client times out
+        C->>R: MsgSendv ENCRYPT
+        Note over R: into the wait FIFO,<br/>the client stays<br/>reply-blocked
+        Note over C: 10 s pass
+        K->>R: _PULSE_CODE_UNBLOCK<br/>the client's TimerTimeout fired
+        R-->>C: MsgError ETIMEDOUT
+        Note over C: prints "no Encrypted<br/>Block within 10 s"
+    else The client dies while its Job runs
+        C-xK: the process ends
+        K->>R: _PULSE_CODE_DISCONNECT<br/>with the client's scoid
+        Note over R: drop its waiting requests<br/>and finished Jobs, mark its<br/>running Jobs Abandoned,<br/>ConnectDetach
+        J->>J: the Tasks finish,<br/>the result is discarded
+        J->>R: the slot is free again
+        Note over R: admit the oldest<br/>waiting request
+    end
+```
+
 ---
 
 ## 6. Verification
+
+```mermaid
+flowchart LR
+    subgraph HOST["On Linux or WSL, no Pi"]
+        direction TB
+        MT["make test<br/>AddressSanitizer + UBSan"]
+        TS["make tsan<br/>ThreadSanitizer"]
+        QS["make qnx-syntax<br/>QNX sources vs stub headers"]
+    end
+    subgraph WHAT["What is checked"]
+        direction TB
+        NIST["cipher correct<br/>NIST SP 800-38A vectors"]
+        PAR["parallel = Reference Encryption<br/>1 to 8 workers, 1 B to 2 MB"]
+        E2E["test_e2e: real server.c + client.c<br/>16 clients, Job cap, every error,<br/>files, disconnect, timeout"]
+        RACE["no data races"]
+        COMP["QNX code compiles"]
+    end
+    subgraph PI["On the Pi"]
+        direction TB
+        SELF["encserver start-up<br/>cipher self-test"]
+        VER["encclient<br/>verifies run 1, -V every run"]
+        CMP["encrypt, decrypt, cmp<br/>files identical"]
+    end
+    MT --> NIST
+    MT --> PAR
+    MT --> E2E
+    TS --> RACE
+    QS --> COMP
+    SELF --> NIST
+    VER --> PAR
+    CMP --> PAR
+
+    classDef host fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef what fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef pi fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    class MT,TS,QS host
+    class NIST,PAR,E2E,RACE,COMP what
+    class SELF,VER,CMP pi
+    style HOST fill:#d977061a,stroke:#d97706,color:#d97706
+    style WHAT fill:#16a34a1a,stroke:#16a34a,color:#16a34a
+    style PI fill:#7c3aed1a,stroke:#7c3aed,color:#7c3aed
+```
 
 | What | How |
 |---|---|
@@ -366,6 +691,53 @@ VERIFY: encrypted = ReferenceEncryption(data) AND decrypt(encrypted) = data
 - **Encryption Time**: measured by the server, from the first Task queued to the last Task finished. It is returned in the FETCH reply.
 - **Round-Trip Time**: measured by the client, from just before the ENCRYPT `MsgSendv` to the end of the FETCH reply. It includes both message copies, the Job id reply, the event, and the FETCH exchange, so it is a little longer than it was with a single reply. Encryption Time is unchanged.
 
+Where the two times start and stop. Encryption Time is the inner, green part:
+
+```mermaid
+sequenceDiagram
+    participant C as encclient
+    participant R as encserver Receive Thread
+    participant W as Worker Pool
+    rect rgba(37,99,235,0.10)
+        Note over C,W: Round-Trip Time, measured by the client
+        C->>R: ENCRYPT with the Data Block (copied by the kernel)
+        R-->>C: Job id
+        rect rgba(22,163,74,0.20)
+            Note over R,W: Encryption Time, measured by the server
+            R->>W: first Task queued
+            W->>W: Segments encrypted in parallel
+            W-->>R: last Task finished
+        end
+        R-)C: Event
+        C->>R: FETCH
+        R-->>C: Encrypted Block (copied by the kernel)
+    end
+```
+
+How the benchmark runs, in `bench.sh` and in step 9 of the dashboard:
+
+```mermaid
+flowchart TB
+    START["bench.sh"] --> LOOP{"next Worker Pool size<br/>1, 2, 4, 8"}
+    LOOP -- "N workers" --> SRV["start a fresh<br/>encserver -w N"]
+    SRV --> WARM["5 warm-up requests<br/>not measured"]
+    WARM --> RUNS["200 measured runs<br/>encclient -s 2097152"]
+    RUNS --> CSV[("results.csv<br/>one row per run")]
+    RUNS --> STOP["stop encserver"]
+    STOP --> LOOP
+    LOOP -- "all sizes done" --> TABLE["speedup table<br/>mean with 1 worker / mean with N"]
+    CSV --> XL["Excel pivot table<br/>LAB-GUIDE Part 8"]
+
+    classDef step fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef srv fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef out fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    class START,LOOP,WARM,RUNS step
+    class SRV,STOP srv
+    class CSV data
+    class TABLE,XL out
+```
+
 `scripts/bench.sh` runs 1, 2, 4 and 8 workers, with 5 warm-up runs and 200 measured runs each, and writes `results.csv`. On the Pi 4B the bundled AES runs at roughly 10 MB/s per core (measured: a 2 MB Data Block in about 50 ms on 4 workers). So a 2 MB Data Block takes around 200 ms on one worker, much longer than the threading overhead, and the speedup up to 4 workers should be clear. The 8-worker run shows what happens with more workers than cores.
 
 To benchmark larger Data Blocks later, raise `ENC_MAX_BLOCK` in `src/core/config.h` and rebuild.
@@ -378,6 +750,27 @@ The server never sees files. A file is only a sequence of Data Blocks, so everyt
 
 **Encrypting (`encclient -e`):**
 
+```mermaid
+flowchart LR
+    F["report.pdf<br/>any size"] --> CUT["cut into<br/>2 MB Data Blocks"]
+    CUT --> SEND["4 sender threads, -j 4<br/>each takes the next<br/>block number"]
+    SEND <-- "ENCRYPT, Event,<br/>FETCH" --> SRV["encserver<br/>several Jobs on<br/>one Worker Pool"]
+    SEND --> BODY["encrypted bytes<br/>at their final offsets"]
+    MAIN["main thread<br/>progress bar"] -.-> HEAD["header, one IV<br/>per block, last"]
+    BODY --> OUT["report.pdf.enc"]
+    HEAD --> OUT
+
+    classDef data fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef server fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    class F,CUT,BODY,HEAD,OUT data
+    class SEND,MAIN client
+    class SRV server
+```
+
+<details>
+<summary>Plain-text version of this diagram</summary>
+
 ```
 file ──split──► Data Block 1   Data Block 2   ...   Data Block n      (2 MB each, last one shorter)
                      │              │                    │
@@ -386,6 +779,8 @@ file ──split──► Data Block 1   Data Block 2   ...   Data Block n      
                      │              │                    │
 Encrypted File:  [ readable header with one IV per block | encrypted bytes, same length as the file ]
 ```
+
+</details>
 
 - Several Data Blocks are in flight at once, so the server runs several Jobs together on one Worker Pool. With 4 in flight on 4 cores every Job keeps the workers busy.
 - Each sender thread has its own private channel and pulse, so it receives only the events for its own Data Blocks. `-j` goes up to `ENC_MAX_JOBS` (8).
@@ -424,6 +819,37 @@ iv 1    02d96ed12ec2d1706ebe75bc5a27fc23
 ---
 
 ## 9. QNX kernel primitives used
+
+```mermaid
+mindmap
+  root((QNX primitives<br/>in this project))
+    Message passing
+      MsgSendv
+      MsgReceive
+      MsgRead
+      MsgReply and MsgReplyv
+      MsgError
+    Naming
+      name_attach
+      name_open and name_close
+    Channels and connections
+      ChannelCreate
+      ConnectAttach with side channel
+      ConnectDetach
+    Events and pulses
+      MsgRegisterEvent
+      MsgDeliverEvent
+      MsgReceivePulse
+      Disconnect pulse
+      Unblock pulse
+    Timeouts
+      TimerTimeout
+    Threads and sync
+      Worker Pool threads
+      Job Coordinators
+      Mutexes
+      Condition variables
+```
 
 | Primitive | What it does here | Where |
 |---|---|---|
