@@ -3,6 +3,12 @@
 QNX Concurrent Encryption - Live Control Center Backend
 Provides a complete HTTP + Server-Sent Events (SSE) control bridge
 between the browser dashboard, the local Windows host PC, and the Raspberry Pi 4B (QNX 8.0).
+
+Non-interactive SSH Management:
+- Suppresses all interactive console password prompts (stdin=DEVNULL, NumberOfPasswordPrompts=1).
+- Automatically supplies 'qnxuser' password via SSH_ASKPASS (askpass.exe / askpass.cmd).
+- Supports 1-click SSH Key pairing (/api/setup_keys) for permanent passwordless SSH.
+- Throttles hardware polling and caches status checks to prevent connection hammering.
 """
 
 import sys
@@ -20,17 +26,56 @@ from urllib.parse import urlparse, parse_qs
 PORT = 8080
 PI_IP = "10.0.0.1"
 PI_USER = "qnxuser"
+PI_PASSWORD = "qnxuser"
 PI_DIR = "/var/encsvc"
-SSH_OPTS = ["-o", "MACs=hmac-sha2-256", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=NUL", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=2"]
 
 # Directories
 DASHBOARD_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(DASHBOARD_DIR)
 
+# Path to askpass executable or batch script
+ASKPASS_EXE = os.path.join(DASHBOARD_DIR, "askpass.exe")
+ASKPASS_CMD = os.path.join(DASHBOARD_DIR, "askpass.cmd")
+ASKPASS_BAT = os.path.join(DASHBOARD_DIR, "askpass.bat")
+
+def get_askpass_path():
+    # If askpass.exe missing but gcc available, compile it for optimal native performance
+    if not os.path.isfile(ASKPASS_EXE) and shutil.which("gcc"):
+        try:
+            subprocess.run(["gcc", os.path.join(DASHBOARD_DIR, "askpass.c"), "-o", ASKPASS_EXE], stdin=subprocess.DEVNULL, timeout=4)
+        except Exception:
+            pass
+
+    for p in [ASKPASS_EXE, ASKPASS_CMD, ASKPASS_BAT]:
+        if os.path.isfile(p):
+            return p
+    return None
+
+def get_ssh_env():
+    env = os.environ.copy()
+    ap = get_askpass_path()
+    if ap:
+        env["SSH_ASKPASS"] = ap
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        env["DISPLAY"] = "dummy:0"
+    return env
+
+# OpenSSH Options: Strict timeouts, no host prompt, no interactive terminal query
+SSH_OPTS = [
+    "-o", "MACs=hmac-sha2-256",
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=NUL" if sys.platform == "win32" else "/dev/null",
+    "-o", "LogLevel=ERROR",
+    "-o", "ConnectTimeout=2",
+    "-o", "NumberOfPasswordPrompts=1"
+]
+
 # Global State
 state = {
-    "mode": "auto",            # "hardware" or "simulation" or "auto"
+    "mode": "auto",            # "hardware", "simulation", or "auto"
     "hardware_available": False,
+    "ping_ok": False,
+    "ssh_ok": False,
     "server_running": False,
     "server_pid": None,
     "last_command": None,
@@ -56,17 +101,25 @@ def broadcast_event(event_type, data):
 
 def check_ping(host):
     try:
-        cmd = ["ping", "-n", "1", "-w", "800", host] if sys.platform == "win32" else ["ping", "-c", "1", "-W", "1", host]
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmd = ["ping", "-n", "1", "-w", "500", host] if sys.platform == "win32" else ["ping", "-c", "1", "-W", "1", host]
+        res = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return res.returncode == 0
     except Exception:
         return False
 
 def check_ssh():
+    """Non-interactive SSH probe that NEVER prompts the console."""
     try:
-        cmd = ["ssh"] + SSH_OPTS + [f"{PI_USER}@{PI_IP}", "echo ok"]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
-        return "ok" in res.stdout
+        # 1. Try BatchMode first (fastest, succeeds if SSH key installed)
+        cmd_batch = ["ssh", "-o", "BatchMode=yes"] + SSH_OPTS + [f"{PI_USER}@{PI_IP}", "echo ok"]
+        res = subprocess.run(cmd_batch, stdin=subprocess.DEVNULL, env=get_ssh_env(), capture_output=True, text=True, timeout=2)
+        if "ok" in res.stdout:
+            return True
+
+        # 2. Try with askpass (auto-supplies qnxuser password, stdin is DEVNULL)
+        cmd_ask = ["ssh"] + SSH_OPTS + [f"{PI_USER}@{PI_IP}", "echo ok"]
+        res_ask = subprocess.run(cmd_ask, stdin=subprocess.DEVNULL, env=get_ssh_env(), capture_output=True, text=True, timeout=2)
+        return "ok" in res_ask.stdout
     except Exception:
         return False
 
@@ -84,25 +137,69 @@ def check_sdp():
         return "In PATH"
     return None
 
+def setup_ssh_keys():
+    """Generates ~/.ssh/id_rsa if missing, and installs it onto the Pi at 10.0.0.1"""
+    try:
+        user_home = os.path.expanduser("~")
+        ssh_dir = os.path.join(user_home, ".ssh")
+        os.makedirs(ssh_dir, exist_ok=True)
+        key_file = os.path.join(ssh_dir, "id_rsa")
+        pub_file = key_file + ".pub"
+
+        if not os.path.exists(pub_file):
+            subprocess.run(["ssh-keygen", "-q", "-t", "rsa", "-N", "", "-f", key_file], stdin=subprocess.DEVNULL, timeout=5)
+
+        if not os.path.exists(pub_file):
+            return False, "Could not generate local SSH keypair"
+
+        with open(pub_file, "r") as f:
+            pub_key = f.read().strip()
+
+        # Copy pub_key to Pi using askpass
+        setup_cmd = (
+            f"mkdir -p ~/.ssh /var/encsvc/.ssh && "
+            f"grep -qxF '{pub_key}' ~/.ssh/authorized_keys 2>/dev/null || echo '{pub_key}' >> ~/.ssh/authorized_keys ; "
+            f"chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
+        )
+        ssh_cmd = ["ssh"] + SSH_OPTS + [f"{PI_USER}@{PI_IP}", setup_cmd]
+        res = subprocess.run(ssh_cmd, stdin=subprocess.DEVNULL, env=get_ssh_env(), capture_output=True, text=True, timeout=5)
+        if res.returncode == 0:
+            return True, "SSH Key installed on Pi 4B! Passwordless login is now fully active."
+        else:
+            return False, f"Failed to install key on Pi: {res.stderr.strip() or 'Unknown error'}"
+    except Exception as e:
+        return False, f"Key setup error: {e}"
+
 # Background monitor thread for hardware connectivity
 def hardware_monitor_loop():
+    last_ssh_check = 0
     while True:
         ping_ok = check_ping(PI_IP)
-        ssh_ok = check_ssh() if ping_ok else False
-        state["hardware_available"] = ssh_ok
-        
-        effective_mode = "hardware" if (state["mode"] == "hardware" or (state["mode"] == "auto" and ssh_ok)) else "simulation"
+        now = time.time()
+
+        if ping_ok:
+            interval = 6 if state["ssh_ok"] else 10
+            if (now - last_ssh_check) >= interval:
+                state["ssh_ok"] = check_ssh()
+                last_ssh_check = now
+        else:
+            state["ssh_ok"] = False
+
+        state["ping_ok"] = ping_ok
+        state["hardware_available"] = state["ssh_ok"]
+
+        effective_mode = "hardware" if (state["mode"] == "hardware" or (state["mode"] == "auto" and state["ssh_ok"])) else "simulation"
 
         broadcast_event("status_update", {
             "ping": ping_ok,
-            "ssh": ssh_ok,
-            "hardware_available": ssh_ok,
+            "ssh": state["ssh_ok"],
+            "hardware_available": state["ssh_ok"],
             "mode": effective_mode,
             "configured_mode": state["mode"],
             "server_running": state["server_running"],
             "sdp_path": check_sdp()
         })
-        time.sleep(4)
+        time.sleep(3)
 
 # Live Server Process Runner (SSH or Simulation)
 server_process = None
@@ -113,13 +210,21 @@ def start_server_live():
     with server_lock:
         if state["server_running"]:
             return True, "Server already running"
-        
+
         effective_mode = "hardware" if (state["mode"] == "hardware" or (state["mode"] == "auto" and state["hardware_available"])) else "simulation"
-        
+
         if effective_mode == "hardware":
             cmd = ["ssh"] + SSH_OPTS + [f"{PI_USER}@{PI_IP}", f"cd {PI_DIR} && ./encserver -v"]
             try:
-                server_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                server_process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=get_ssh_env(),
+                    text=True,
+                    bufsize=1
+                )
                 state["server_running"] = True
                 threading.Thread(target=stream_process_output, args=(server_process, "server_log"), daemon=True).start()
                 return True, "encserver started on Pi 4B (10.0.0.1)"
@@ -137,7 +242,12 @@ def stop_server_live():
         effective_mode = "hardware" if (state["mode"] == "hardware" or (state["mode"] == "auto" and state["hardware_available"])) else "simulation"
         if effective_mode == "hardware":
             try:
-                subprocess.run(["ssh"] + SSH_OPTS + [f"{PI_USER}@{PI_IP}", "slay encserver"], timeout=3)
+                subprocess.run(
+                    ["ssh"] + SSH_OPTS + [f"{PI_USER}@{PI_IP}", "slay encserver"],
+                    stdin=subprocess.DEVNULL,
+                    env=get_ssh_env(),
+                    timeout=3
+                )
             except Exception:
                 pass
             if server_process:
@@ -179,7 +289,7 @@ def simulated_server_stream():
 # Execution Manager for Client Commands
 def execute_client_command(command_id, custom_cmd=None):
     effective_mode = "hardware" if (state["mode"] == "hardware" or (state["mode"] == "auto" and state["hardware_available"])) else "simulation"
-    
+
     commands_map = {
         "build": {
             "title": "Phase 1: Build Programs (PC)",
@@ -258,18 +368,36 @@ def execute_client_command(command_id, custom_cmd=None):
 
 def run_hardware_command(cmd_info):
     try:
+        env = get_ssh_env()
         if cmd_info.get("is_host"):
             sdp_bat = check_sdp()
             if sdp_bat and sdp_bat != "In PATH":
                 full_cmd = f'call "{sdp_bat}" && {cmd_info["sh"]}'
             else:
                 full_cmd = cmd_info["sh"]
-            proc = subprocess.Popen(["cmd.exe", "/c", full_cmd], cwd=PROJECT_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            proc = subprocess.Popen(
+                ["cmd.exe", "/c", full_cmd],
+                cwd=PROJECT_DIR,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                text=True,
+                bufsize=1
+            )
         else:
             sh_cmd = cmd_info["sh"]
             ssh_cmd = ["ssh"] + SSH_OPTS + [f"{PI_USER}@{PI_IP}", f"sh -c '{sh_cmd}'"]
-            proc = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        
+            proc = subprocess.Popen(
+                ssh_cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                text=True,
+                bufsize=1
+            )
+
         for line in proc.stdout:
             broadcast_event("client_log", {"line": line})
         proc.wait()
@@ -342,7 +470,7 @@ def run_simulated_command(command_id, cmd_info):
     for l in lines:
         broadcast_event("client_log", {"line": l + "\n"})
         time.sleep(0.12)
-    
+
     # Also trigger simulated server log if running
     if state["server_running"] and command_id in ["12mb_ram", "multi_client", "hello"]:
         sim_server_lines = [
@@ -363,7 +491,7 @@ class LiveControlHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
-        
+
         # SSE Event Stream Endpoint
         if url.path == "/api/stream":
             self.send_response(200)
@@ -378,10 +506,15 @@ class LiveControlHandler(SimpleHTTPRequestHandler):
                 sse_clients.append(client_queue)
 
             # Send initial state
+            effective_mode = "hardware" if (state["mode"] == "hardware" or (state["mode"] == "auto" and state["ssh_ok"])) else "simulation"
             init_data = {
                 "server_running": state["server_running"],
-                "hardware_available": state["hardware_available"],
-                "mode": state["mode"]
+                "hardware_available": state["ssh_ok"],
+                "ping": state["ping_ok"],
+                "ssh": state["ssh_ok"],
+                "mode": effective_mode,
+                "configured_mode": state["mode"],
+                "sdp_path": check_sdp()
             }
             self.wfile.write(f"event: init\ndata: {json.dumps(init_data)}\n\n".encode("utf-8"))
             self.wfile.flush()
@@ -399,21 +532,17 @@ class LiveControlHandler(SimpleHTTPRequestHandler):
                         sse_clients.remove(client_queue)
             return
 
-        # Status Check API
+        # Status Check API (cached, non-blocking)
         elif url.path == "/api/status":
-            ping_ok = check_ping(PI_IP)
-            ssh_ok = check_ssh() if ping_ok else False
+            effective_mode = "hardware" if (state["mode"] == "hardware" or (state["mode"] == "auto" and state["ssh_ok"])) else "simulation"
             sdp_bat = check_sdp()
-            state["hardware_available"] = ssh_ok
-
-            effective_mode = "hardware" if (state["mode"] == "hardware" or (state["mode"] == "auto" and ssh_ok)) else "simulation"
 
             res = {
                 "sdp_found": sdp_bat is not None,
                 "sdp_path": sdp_bat,
                 "pi_ip": PI_IP,
-                "pi_ping": ping_ok,
-                "pi_ssh": ssh_ok,
+                "pi_ping": state["ping_ok"],
+                "pi_ssh": state["ssh_ok"],
                 "server_running": state["server_running"],
                 "mode": effective_mode,
                 "configured_mode": state["mode"]
@@ -466,7 +595,15 @@ class LiveControlHandler(SimpleHTTPRequestHandler):
         elif url.path == "/api/mode":
             new_mode = params.get("mode", "auto")
             state["mode"] = new_mode
-            self.send_json({"ok": True, "mode": state["mode"]})
+            effective_mode = "hardware" if (state["mode"] == "hardware" or (state["mode"] == "auto" and state["ssh_ok"])) else "simulation"
+            self.send_json({"ok": True, "mode": state["mode"], "effective_mode": effective_mode})
+            return
+
+        elif url.path == "/api/setup_keys":
+            ok, msg = setup_ssh_keys()
+            if ok:
+                state["ssh_ok"] = True
+            self.send_json({"ok": ok, "message": msg})
             return
 
         self.send_response(404)
@@ -486,8 +623,9 @@ def run():
     print(f" QNX Concurrent Encryption - Live Control Center Backend")
     print(f" Target Pi 4B: {PI_IP} ({PI_USER})")
     print(f" Local Web UI: http://localhost:{PORT}")
+    print(f" Non-interactive SSH: askpass enabled, prompt suppressed")
     print(f"===============================================================")
-    
+
     # Start background monitor thread
     threading.Thread(target=hardware_monitor_loop, daemon=True).start()
 

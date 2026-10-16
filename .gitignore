@@ -6,3 +6,4 @@ results.csv
 *.enc
 demo-out/
 big.bin
+dashboard/*.exe

@@ -543,6 +543,19 @@ function triggerServerStop() {
     });
 }
 
+function triggerKeySetup() {
+  showToast('Pairing SSH key with Pi 4B (10.0.0.1)...');
+  fetch('/api/setup_keys', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      showToast(data.message);
+      refreshSystemStatus();
+    })
+    .catch(err => {
+      showToast('Key pairing error: ' + err);
+    });
+}
+
 function triggerCommand(commandId, customCmd) {
   showToast(`Executing: ${commandId}...`);
   const activeBtn = document.querySelector(`[data-cmd="${commandId}"]`);
