@@ -48,12 +48,14 @@ struct qnx_stub_sigevent {
      (__e)->sigev_priority = (__p))
 #define SIGEV_UNBLOCK_INIT(__e)     ((__e)->sigev_notify = SIGEV_UNBLOCK)
 
+/* Field order as in the QNX 8.0 reference for _msg_info (64-bit layout). */
 struct _msg_info {
-    uint32_t nd, srcnd;
+    uint32_t reserved[2];
     pid_t pid;
     int32_t tid, chid, scoid, coid;
-    int16_t priority, flags;
     ssize64_t msglen, srcmsglen, dstmsglen;
+    int16_t priority, flags;
+    uint32_t type_id;
 };
 
 struct _pulse {
@@ -90,10 +92,11 @@ int MsgUnregisterEvent(const struct sigevent *event);
 
 int ChannelCreate(unsigned flags);
 int ChannelDestroy(int chid);
-int ConnectAttach(uint32_t nd, pid_t pid, int chid, unsigned index, int flags);
+/* QNX 8.0 names the first argument `reserved`; ND_LOCAL_NODE (0) is still what goes there. */
+int ConnectAttach(uint32_t reserved, pid_t pid, int chid, unsigned index, int flags);
 int ConnectDetach(int coid);
 
-int TimerTimeout(clockid_t id, int flags, const struct sigevent *notify, const uint64_t *ntime,
+int TimerTimeout(clockid_t id, uint32_t flags, const struct sigevent *notify, const uint64_t *ntime,
                  uint64_t *otime);
 
 #endif

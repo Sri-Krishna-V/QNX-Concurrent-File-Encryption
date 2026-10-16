@@ -76,7 +76,7 @@ int encsvc_notify_close(encsvc_notify_t *notify)
 }
 
 /* Arm a kernel timeout, ending at `deadline`, for this thread's next blocking call in `states`. */
-static int arm_timeout(int states, uint64_t deadline)
+static int arm_timeout(uint32_t states, uint64_t deadline)
 {
     struct sigevent unblock;
     uint64_t now = now_ns(), left;
