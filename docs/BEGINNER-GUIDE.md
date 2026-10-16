@@ -624,6 +624,12 @@ Anything else: see the full table in [LAB-GUIDE.md](LAB-GUIDE.md), Part 9. When 
    | Step 3 or 4: several Jobs `in progress` at once | The server answers ENCRYPT at once, tells the client with an event (pulse) when the Job is done, and the client fetches the result, so the server keeps accepting new messages | [DESIGN.md](DESIGN.md) 4.6, [ADR 0003](adr/0003-event-notification.md) |
    | Step 5, or `bench.sh` | Speedup grows up to 4 workers on 4 cores | [DESIGN.md](DESIGN.md) 7 |
 
+**With the dashboard instead:** the *encserver on the Pi* window is the left window, and the
+*Dashboard activity* window is the right one. Run steps 1 to 9 (see the click-by-click run in
+[dashboard/README.md](../dashboard/README.md)), point at the same things in the two windows, and
+finish on the **Analytics** tab: the speedup chart (step 9), Segments per worker (load balance),
+and the Round-Trip Time of several clients (step 8).
+
 ---
 
 ## Cheat sheet

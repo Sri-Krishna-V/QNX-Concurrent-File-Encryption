@@ -44,7 +44,8 @@ connecting to the Pi to the analytics in ten clicks: build, deploy, key, start e
 files, parallel Jobs, several clients, the scaling benchmark, clean up. The work shows in
 command-prompt windows, as it would in SSH windows on the Pi (encclient's progress bars, the
 encserver log, scp's transfer figures); the results and charts show on the page.
-See [dashboard/README.md](dashboard/README.md).
+See [dashboard/README.md](dashboard/README.md): what to check before you start, a first run
+click by click, what each button does, and what to do when a step fails.
 
 ```sh
 py -m unittest discover -s dashboard/tests     # dashboard tests (no Pi needed)
