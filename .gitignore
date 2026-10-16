@@ -4,3 +4,5 @@ bin/aarch64le/encclient
 results.csv
 *.key
 *.enc
+demo-out/
+big.bin

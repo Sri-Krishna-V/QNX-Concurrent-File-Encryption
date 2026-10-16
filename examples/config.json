@@ -1,0 +1,28 @@
+{
+  "service": "encsvc",
+  "cipher": "AES-256-CTR",
+  "max_data_block_bytes": 2097152,
+  "max_jobs": 8,
+  "workers": 4,
+  "target": {
+    "board": "Raspberry Pi 4B",
+    "os": "QNX 8.0.3",
+    "cpu": "Cortex-A72 x4"
+  },
+  "clients": [
+    {
+      "name": "logger",
+      "files": [
+        "sensor-log.csv"
+      ],
+      "in_flight": 4
+    },
+    {
+      "name": "camera",
+      "files": [
+        "qnx-pi.png"
+      ],
+      "in_flight": 2
+    }
+  ]
+}

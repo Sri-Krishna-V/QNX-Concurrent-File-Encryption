@@ -9,13 +9,16 @@
 #include <sys/syspage.h>
 #endif
 
+#include "sync.h"
 #include "util.h"
 
 uint64_t now_ns(void)
 {
     struct timespec ts;
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        enc_fatal("clock_gettime", errno);      /* cannot fail with a valid clock id */
+    }
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
@@ -44,7 +47,9 @@ int random_bytes(uint8_t *buf, size_t len)
         return errno;
     }
     err = read_exact(fd, buf, len);
-    close(fd);
+    if (close(fd) != 0 && err == 0) {
+        err = errno;
+    }
     return err;
 }
 
@@ -52,16 +57,24 @@ int keyfile_load(const char *path, uint8_t key[ENC_KEY_LEN])
 {
     uint8_t extra;
     int fd = open(path, O_RDONLY);
+    ssize_t n;
     int err;
 
     if (fd < 0) {
         return errno;
     }
     err = read_exact(fd, key, ENC_KEY_LEN);
-    if (err == 0 && read(fd, &extra, 1) != 0) {
-        err = EINVAL;               /* longer than ENC_KEY_LEN: wrong file */
+    if (err == 0) {
+        n = read(fd, &extra, 1);
+        if (n < 0) {
+            err = errno;
+        } else if (n > 0) {
+            err = EINVAL;           /* longer than ENC_KEY_LEN: wrong file */
+        }
     }
-    close(fd);
+    if (close(fd) != 0 && err == 0) {
+        err = errno;
+    }
     return err;
 }
 

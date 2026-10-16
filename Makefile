@@ -5,6 +5,7 @@
 #   make test             build and run the portable-core tests on Linux/WSL with gcc
 #   make tsan             the same tests under ThreadSanitizer
 #   make qnx-syntax       compile-check the QNX sources on Linux against stub headers
+#   make deploy           copy programs, scripts and examples to the Pi (PI=, PI_DIR= to change)
 #   make clean
 #
 # The QNX build needs the SDP environment first:
@@ -16,7 +17,9 @@ QCC         ?= qcc
 HOSTCC      ?= gcc
 
 CORE_SRC   := src/core/cipher_common.c src/core/worker_pool.c src/core/segment.c \
-              src/core/job.c src/core/util.c
+              src/core/job.c src/core/util.c src/core/display.c src/core/encfile.c \
+              src/core/sync.c
+CLIENT_SRC := src/qnx/client.c src/qnx/client_file.c src/qnx/client_msg.c
 ifeq ($(CRYPTO),builtin)
 CIPHER_SRC := src/core/cipher_builtin.c src/core/aes256.c
 CRYPTO_LIB :=
@@ -38,8 +41,8 @@ all: $(QNX_OUT)/encserver $(QNX_OUT)/encclient
 $(QNX_OUT)/encserver: src/qnx/server.c $(CORE_SRC) $(CIPHER_SRC) src/core/*.h src/qnx/*.h
 	$(QCC) $(QNX_CFLAGS) -o $@ src/qnx/server.c $(CORE_SRC) $(CIPHER_SRC) $(CRYPTO_LIB)
 
-$(QNX_OUT)/encclient: src/qnx/client.c $(CORE_SRC) $(CIPHER_SRC) src/core/*.h src/qnx/*.h
-	$(QCC) $(QNX_CFLAGS) -o $@ src/qnx/client.c $(CORE_SRC) $(CIPHER_SRC) $(CRYPTO_LIB)
+$(QNX_OUT)/encclient: $(CLIENT_SRC) $(CORE_SRC) $(CIPHER_SRC) src/core/*.h src/qnx/*.h
+	$(QCC) $(QNX_CFLAGS) -o $@ $(CLIENT_SRC) $(CORE_SRC) $(CIPHER_SRC) $(CRYPTO_LIB)
 
 # ---------------------------------------------------------------- host tests
 HOST_OUT    := build/host
@@ -64,8 +67,11 @@ define host_tests
 		-o $(HOST_OUT)/e2e_server.o
 	$(HOSTCC) $(HOST_CFLAGS) $(1) $(E2E_INC) -Dmain=encclient_main -c src/qnx/client.c \
 		-o $(HOST_OUT)/e2e_client.o
+	$(HOSTCC) $(HOST_CFLAGS) $(1) $(E2E_INC) -c src/qnx/client_file.c -o $(HOST_OUT)/e2e_client_file.o
+	$(HOSTCC) $(HOST_CFLAGS) $(1) $(E2E_INC) -c src/qnx/client_msg.c -o $(HOST_OUT)/e2e_client_msg.o
 	$(HOSTCC) $(HOST_CFLAGS) $(1) $(E2E_INC) -o $(HOST_OUT)/test_e2e tests/test_e2e.c \
 		tests/qnx_shim.c $(HOST_OUT)/e2e_server.o $(HOST_OUT)/e2e_client.o \
+		$(HOST_OUT)/e2e_client_file.o $(HOST_OUT)/e2e_client_msg.o \
 		$(CORE_SRC) src/core/cipher_openssl.c -lcrypto
 	$(2) $(HOST_OUT)/test_e2e > $(HOST_OUT)/test_e2e.log || (cat $(HOST_OUT)/test_e2e.log; false)
 	tail -n 2 $(HOST_OUT)/test_e2e.log
@@ -85,10 +91,27 @@ tsan:
 qnx-syntax:
 	$(HOSTCC) $(COMMON_CFLAGS) -fsyntax-only -Isrc/qnx -Itests/qnx_stub -D__QNX__ src/qnx/server.c
 	$(HOSTCC) $(COMMON_CFLAGS) -fsyntax-only -Isrc/qnx -Itests/qnx_stub -D__QNX__ src/qnx/client.c
+	$(HOSTCC) $(COMMON_CFLAGS) -fsyntax-only -Isrc/qnx -Itests/qnx_stub -D__QNX__ src/qnx/client_file.c
+	$(HOSTCC) $(COMMON_CFLAGS) -fsyntax-only -Isrc/qnx -Itests/qnx_stub -D__QNX__ src/qnx/client_msg.c
 	@echo "QNX sources compile-check: passed"
+
+# ---------------------------------------------------------------- deploy to the Pi
+# Build first (make, or make CRYPTO=builtin), then: make deploy
+# No shell wildcards on this side, so it also works from a Windows command prompt.
+PI       ?= qnxuser@10.0.0.1
+PI_DIR   ?= /var/encsvc
+SSH_OPTS ?= -o MACs=hmac-sha2-256
+
+deploy:
+	ssh $(SSH_OPTS) $(PI) "mkdir -p $(PI_DIR)"
+	scp $(SSH_OPTS) $(QNX_OUT)/encserver $(QNX_OUT)/encclient scripts/demo.sh scripts/bench.sh \
+		scripts/lib.sh $(PI):$(PI_DIR)/
+	scp -r $(SSH_OPTS) examples $(PI):$(PI_DIR)/
+	ssh $(SSH_OPTS) $(PI) "cd $(PI_DIR) && chmod +x encserver encclient demo.sh bench.sh"
+	@echo "deployed to $(PI):$(PI_DIR)"
 
 clean:
 	rm -f $(QNX_OUT)/encserver $(QNX_OUT)/encclient
 	rm -rf $(HOST_OUT)
 
-.PHONY: all test tsan qnx-syntax clean
+.PHONY: all test tsan qnx-syntax deploy clean

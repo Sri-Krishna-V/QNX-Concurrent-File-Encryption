@@ -1,3 +1,6 @@
 * text=auto
 *.sh text eol=lf
 Makefile text eol=lf
+
+# Example files must reach the Pi byte for byte (no line-ending changes).
+examples/** -text

@@ -1,5 +1,7 @@
 # Return the Encrypted Block through a deferred reply
 
+**Superseded by [ADR 0003](0003-event-notification.md).** Kept for the record of why the first version used a deferred reply.
+
 The brief asks for a single request-response cycle and an asynchronous return. So the server keeps the client's `rcvid` and replies only when the Job is complete, and the Job Coordinator thread sends that reply (`MsgReplyv`), not the Receive Thread. The Receive Thread never waits for a Job, so the server keeps accepting new requests. The client does the blocking `MsgSendv` on its own sender thread, and its main thread gets a condition-variable signal when the reply arrives.
 
 ## Considered Options

@@ -23,6 +23,9 @@ void pool_submit(worker_pool_t *pool, pool_work_t *work);
 
 unsigned pool_size(const worker_pool_t *pool);
 
+/* Index (0 .. size-1) of the worker calling this, or -1 if not called from a worker. */
+int pool_current_worker(void);
+
 /* Finish every queued item, stop all workers and free the pool. */
 void pool_destroy(worker_pool_t *pool);
 

@@ -8,6 +8,7 @@
 #include "cipher.h"
 #include "job.h"
 #include "segment.h"
+#include "sync.h"
 #include "util.h"
 
 typedef struct {
@@ -18,11 +19,14 @@ typedef struct {
 } task_t;
 
 /* Copy one finished Segment into the Encrypted Block and count it. */
-static void commit_segment(task_t *task, const uint8_t *scratch, int status)
+static void commit_segment(task_t *task, const uint8_t *scratch, int status, int worker)
 {
     job_t *job = task->job;
 
-    pthread_mutex_lock(&job->mutex);
+    enc_lock(&job->mutex);
+    if (worker >= 0 && (unsigned)worker < ENC_MAX_WORKERS) {
+        job->worker_segments[worker]++;
+    }
     if (status == 0) {
         memcpy(job->output + task->offset, scratch, task->length);
     } else if (job->error == 0) {
@@ -31,9 +35,9 @@ static void commit_segment(task_t *task, const uint8_t *scratch, int status)
     job->completed_count++;
     if (job->completed_count == job->total_segments) {
         job->finish_ns = now_ns();
-        pthread_cond_signal(&job->done_cv);
+        enc_cond_signal(&job->done_cv);
     }
-    pthread_mutex_unlock(&job->mutex);
+    enc_unlock(&job->mutex);
 }
 
 /* Runs on a worker thread. Encrypts into private memory, so no lock is held here. */
@@ -50,7 +54,7 @@ static void encrypt_segment(pool_work_t *work)
         status = cipher_ctr(job->key, job->iv, task->offset,
                             job->input + task->offset, scratch, task->length);
     }
-    commit_segment(task, scratch, status);
+    commit_segment(task, scratch, status, pool_current_worker());
     free(scratch);
 }
 
@@ -64,14 +68,7 @@ int job_init(job_t *job, const uint8_t *key, const uint8_t iv[ENC_IV_LEN],
     job->output = output;
     job->len = len;
 
-    if (pthread_mutex_init(&job->mutex, NULL) != 0) {
-        return EAGAIN;
-    }
-    if (pthread_cond_init(&job->done_cv, NULL) != 0) {
-        pthread_mutex_destroy(&job->mutex);
-        return EAGAIN;
-    }
-    return 0;
+    return enc_mutex_cond_init(&job->mutex, &job->done_cv);
 }
 
 int job_run(job_t *job, worker_pool_t *pool)
@@ -100,19 +97,20 @@ int job_run(job_t *job, worker_pool_t *pool)
     job->total_segments = count;
     job->completed_count = 0;
     job->error = 0;
+    memset(job->worker_segments, 0, sizeof job->worker_segments);
 
     start_ns = now_ns();
     for (size_t i = 0; i < count; i++) {
         pool_submit(pool, &tasks[i].work);
     }
 
-    pthread_mutex_lock(&job->mutex);
+    enc_lock(&job->mutex);
     while (job->completed_count < job->total_segments) {
-        pthread_cond_wait(&job->done_cv, &job->mutex);
+        enc_cond_wait(&job->done_cv, &job->mutex);
     }
     err = job->error;
     job->encryption_ns = job->finish_ns - start_ns;
-    pthread_mutex_unlock(&job->mutex);
+    enc_unlock(&job->mutex);
 
     free(tasks);
     return err;
@@ -120,8 +118,8 @@ int job_run(job_t *job, worker_pool_t *pool)
 
 void job_destroy(job_t *job)
 {
-    pthread_cond_destroy(&job->done_cv);
-    pthread_mutex_destroy(&job->mutex);
+    enc_cond_destroy(&job->done_cv);
+    enc_mutex_destroy(&job->mutex);
 }
 
 int reference_encrypt(const uint8_t *key, const uint8_t iv[ENC_IV_LEN],
