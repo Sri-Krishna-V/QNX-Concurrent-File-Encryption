@@ -7,10 +7,13 @@ The code shows:
 - condition-variable completion signalling,
 - QNX message passing with a deferred reply.
 
+**New to the project?** Start with [docs/BEGINNER-GUIDE.md](docs/BEGINNER-GUIDE.md): copy-paste steps from the lab PC to the Pi, and a checklist that tries every feature.
+
 ## Documents
 
 | File | What it is |
 |---|---|
+| [docs/BEGINNER-GUIDE.md](docs/BEGINNER-GUIDE.md) | For first-time users: build, copy to the Pi, the demo, every feature as a checklist |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, decisions, pseudocode, communication flow |
 | [docs/LAB-GUIDE.md](docs/LAB-GUIDE.md) | Step by step: SD card, build, copy to the Pi, run, benchmark |
 | [docs/adr/0001-deferred-reply.md](docs/adr/0001-deferred-reply.md) | Why the server replies late instead of using pulse notification |

@@ -387,10 +387,11 @@ int main(int argc, char **argv)
 
     attach = name_attach(NULL, ENCSVC_NAME, 0);
     if (attach == NULL) {
+        err = errno;                /* perror() may change errno */
         perror("encserver: name_attach");
-        if (errno == EPERM) {
+        if (err == EPERM) {
             fprintf(stderr, "encserver: try running as root (su)\n");
-        } else if (errno == EEXIST) {
+        } else if (err == EEXIST) {
             fprintf(stderr, "encserver: another encserver is already running (slay encserver)\n");
         }
         return 1;

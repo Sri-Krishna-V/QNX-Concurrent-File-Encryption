@@ -248,4 +248,4 @@ Encrypted Files record their Data Block size in the header, so files made before
 | `./bench.sh: Permission denied` (or `demo.sh`) | `chmod +x encserver encclient demo.sh bench.sh` |
 | `bad interpreter` or `$'\r': command not found` | A script was saved with Windows line endings. On the Pi, for each of `demo.sh`, `bench.sh` and `lib.sh`: `tr -d '\r' < demo.sh > x.sh && mv x.sh demo.sh`, then `chmod +x demo.sh bench.sh`. |
 | `cipher self-test FAILED` | Stop here. The cipher library is broken on this target. Try `make CRYPTO=builtin`, and report which backend failed. |
-| `result differs from Reference Encryption` | This is a real bug. Keep the full output and the command line you used. |
+| `Encrypted Block differs from the Reference Encryption` (or `-V`: `Data Block 1 failed: differs…`) | First check that `encserver` and `encclient` use the same `enc.key`: stop the server and start it again from the folder you run `encclient` in. If it still happens, it is a real bug: keep the full output and the command line you used. |
