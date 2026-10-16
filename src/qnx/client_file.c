@@ -240,7 +240,10 @@ static int run_senders(encrypt_run_t *run)
         run->err = EAGAIN;
     }
     while (run->running > 0) {
-        ui_progress("progress", run->done_blocks, run->header->blocks, "Data Blocks");
+        if (run->done_blocks < run->header->blocks) {
+            /* the finished bar is drawn once, after the threads have stopped */
+            ui_progress("progress", run->done_blocks, run->header->blocks, "Data Blocks");
+        }
         enc_cond_wait(&run->progress_cv, &run->mutex);
     }
     err = run->err;
