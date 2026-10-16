@@ -444,8 +444,8 @@ The server runs in the left window (`./encserver -v`). Type these commands in th
     check        ✔ verified: same as the Reference Encryption, and decrypts back
   ```
 
-  - `main thread free for 9 ticks`: the client's main thread was not stuck while it waited. A second thread sent the message and the main thread was woken up when the reply came.
-  - `encryption` is the time on the server. `round trip` also includes copying the 2 MB to the server and back, so it is always larger.
+  - `main thread free for 9 ticks`: the client's main thread was not stuck while it waited. A second thread sent the Data Block, waited for the server's event (a small message that says "your Job is done"), then fetched the Encrypted Block. The main thread was woken up when it arrived.
+  - `encryption` is the time on the server. `round trip` also includes copying the 2 MB to the server and back, the event, and the fetch message, so it is always larger.
 
 - [ ] Many runs, with warm-up runs that are not counted:
 
@@ -594,6 +594,7 @@ Each command below must **fail** with the message shown. That is the feature: th
 | `another encserver is already running` | `slay encserver`, then start it again |
 | `name_attach: Operation not permitted` | Use `su` (password `root`) in **both** windows; see Part 6 |
 | The demo keeps printing `waiting for encserver....` | Start `./encserver -v` in the left window, in `/var/encsvc` |
+| `no Encrypted Block within 10 s` (after `request failed:` or `Data Block N failed:`) | The client waited 10 s and gave up. Look at the left window: the server may have stopped (start it again), or it is overloaded (many clients at once). Run the command again |
 | `Encrypted Block differs from the Reference Encryption` | The server and the client use different keys. Stop the server and start it again in `/var/encsvc` |
 | A decrypted file differs from the original, with no error | It was encrypted with a different `enc.key` (someone made a new key). Encrypt the original again |
 | On the Pi: `Could not load library libcrypto.so.3` | The build missed `CRYPTO=builtin`. Do Part 2 again (with `make clean`), then Part 3 |
@@ -618,7 +619,7 @@ Anything else: see the full table in [LAB-GUIDE.md](LAB-GUIDE.md), Part 9. When 
    | Step 1 or 2: the `w0 … w3` columns in the server log | The Worker Pool splits a Data Block into Segments and encrypts them in parallel | [DESIGN.md](DESIGN.md) 4.1–4.3 |
    | `verified` / `identical` (7.G, 7.D) | Workers write into one shared output buffer safely (mutex) | [DESIGN.md](DESIGN.md) 4.4 |
    | `✔` appears only after all Segments are done; `main thread free for … ticks` (7.I) | Completion is signalled with a condition variable | [DESIGN.md](DESIGN.md) 4.5 |
-   | Step 3 or 4: several Jobs `in progress` at once | The server replies late (deferred reply), so it keeps accepting new messages | [DESIGN.md](DESIGN.md) 4.6, [ADR 0001](adr/0001-deferred-reply.md) |
+   | Step 3 or 4: several Jobs `in progress` at once | The server answers ENCRYPT at once, tells the client with an event (pulse) when the Job is done, and the client fetches the result, so the server keeps accepting new messages | [DESIGN.md](DESIGN.md) 4.6, [ADR 0003](adr/0003-event-notification.md) |
    | Step 5, or `bench.sh` | Speedup grows up to 4 workers on 4 cores | [DESIGN.md](DESIGN.md) 7 |
 
 ---

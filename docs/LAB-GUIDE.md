@@ -212,7 +212,7 @@ Keep the server in the **foreground** in the left window, so its live log stays 
 4. Make the chart in Excel:
    - **Insert → PivotTable**. Put `workers` in Rows and **Average** of `encryption_us` and `round_trip_us` in Values.
    - **Speedup for N workers** = average with 1 worker ÷ average with N workers. Expect it to rise up to 4 workers (the Pi has 4 cores) and level off at 8.
-   - `round_trip_us` is always larger than `encryption_us`. The difference is the cost of copying the Data Block and the Encrypted Block through the kernel.
+   - `round_trip_us` is always larger than `encryption_us`. The difference is the cost of copying the Data Block and the Encrypted Block through the kernel, plus the event and the second message (FETCH) that bring the Encrypted Block back.
 
 Tips for steady numbers:
 - Run the benchmark twice, and use the second run.
@@ -247,5 +247,6 @@ Encrypted Files record their Data Block size in the header, so files made before
 | `qnxpi.local` not found | Use the IP address shown by `ifconfig` on the Pi (Part 3). |
 | `./bench.sh: Permission denied` (or `demo.sh`) | `chmod +x encserver encclient demo.sh bench.sh` |
 | `bad interpreter` or `$'\r': command not found` | A script was saved with Windows line endings. On the Pi, for each of `demo.sh`, `bench.sh` and `lib.sh`: `tr -d '\r' < demo.sh > x.sh && mv x.sh demo.sh`, then `chmod +x demo.sh bench.sh`. |
+| `encclient: ✖ … no Encrypted Block within 10 s (is encserver overloaded or stopped?)` (after `request failed:` or `Data Block N failed:`) | The client waited 10 s and gave up. Look at the left window: the server may have been stopped (start it again), or it is overloaded (many clients at once, or a very slow Pi). Run the command again. |
 | `cipher self-test FAILED` | Stop here. The cipher library is broken on this target. Try `make CRYPTO=builtin`, and report which backend failed. |
 | `Encrypted Block differs from the Reference Encryption` (or `-V`: `Data Block 1 failed: differs…`) | First check that `encserver` and `encclient` use the same `enc.key`: stop the server and start it again from the folder you run `encclient` in. If it still happens, it is a real bug: keep the full output and the command line you used. |

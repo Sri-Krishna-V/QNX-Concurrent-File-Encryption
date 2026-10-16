@@ -1,11 +1,13 @@
 # Concurrent Encryption Service (QNX 8.0, Raspberry Pi 4B)
 
-A client sends a Data Block of up to 2 MB to a QNX server. The server splits the block into Segments, encrypts them in parallel on a Worker Pool with AES-256-CTR, and returns the Encrypted Block asynchronously. Any file of any size can be encrypted: the client sends it as several Data Blocks at once and writes an Encrypted File, which it can also decrypt again.
+A client sends a Data Block of up to 2 MB to a QNX server. The server splits the block into Segments, encrypts them in parallel on a Worker Pool with AES-256-CTR, and tells the client with an event (a QNX pulse) when the Encrypted Block is ready, which the client then fetches. Any file of any size can be encrypted: the client sends it as several Data Blocks at once and writes an Encrypted File, which it can also decrypt again.
 
 The code shows:
 - mutex-protected shared output,
 - condition-variable completion signalling,
-- QNX message passing with a deferred reply.
+- QNX message passing: `MsgSendv`, `MsgRead`, `MsgReplyv`, with the Data Block and the Encrypted Block moved through iov parts,
+- asynchronous completion with a pulse: the client registers it (`MsgRegisterEvent`), the server delivers it (`MsgDeliverEvent`), and the client waits for it with `MsgReceivePulse`,
+- a 10 s kernel timeout on the client (`TimerTimeout`), and disconnect and unblock pulses handled on the server.
 
 **New to the project?** Start with [docs/BEGINNER-GUIDE.md](docs/BEGINNER-GUIDE.md): copy-paste steps from the lab PC to the Pi, and a checklist that tries every feature.
 
@@ -16,15 +18,17 @@ The code shows:
 | [docs/BEGINNER-GUIDE.md](docs/BEGINNER-GUIDE.md) | For first-time users: build, copy to the Pi, the demo, every feature as a checklist |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, decisions, pseudocode, communication flow |
 | [docs/LAB-GUIDE.md](docs/LAB-GUIDE.md) | Step by step: SD card, build, copy to the Pi, run, benchmark |
-| [docs/adr/0001-deferred-reply.md](docs/adr/0001-deferred-reply.md) | Why the server replies late instead of using pulse notification |
+| [docs/adr/0001-deferred-reply.md](docs/adr/0001-deferred-reply.md) | Superseded by ADR 0003. Why the first version used a deferred reply |
+| [docs/adr/0003-event-notification.md](docs/adr/0003-event-notification.md) | Why the server notifies the client with an event and the client then fetches the Encrypted Block (supersedes 0001) |
 | [docs/adr/0002-encrypted-file-without-integrity-check.md](docs/adr/0002-encrypted-file-without-integrity-check.md) | Why Encrypted Files have no MAC and are decrypted on the client |
-| [CONTEXT.md](CONTEXT.md) | Glossary: Data Block, Segment, Job, Task, Worker Pool… |
+| [docs/VIVA-NOTES.md](docs/VIVA-NOTES.md) | Viva preparation: the rubric mapped to this repo, and likely questions with answers |
+| [CONTEXT.md](CONTEXT.md) | Glossary: Data Block, Segment, Job, Task, Worker Pool, Event, Fetch… |
 
 ## Layout
 
 ```
 src/core/      portable: Worker Pool, Job, Segment planning, AES-256-CTR (POSIX only)
-src/qnx/       QNX message passing: server.c (encserver), client.c + client_file.c (encclient)
+src/qnx/       QNX message passing: server.c (encserver), client.c + client_file.c + client_msg.c (encclient)
 tests/         host tests, plus a message-passing stand-in for end-to-end tests
 scripts/       demo.sh (guided demo), bench.sh (benchmark), lib.sh; all run on the Pi
 examples/      real sample files for the demo: text, CSV, JSON, PDF, PNG, WAV
@@ -79,5 +83,7 @@ These are set in `src/core/config.h`:
 | `ENC_SINGLE_SEGMENT_MAX` | 64 KB | At or below this, a Data Block is one Segment |
 | `ENC_MIN_SEGMENT` | 16 KB | Smallest Segment when splitting |
 | `ENC_TASKS_PER_WORKER` | 4 | Segments per worker, for load balancing |
-| `ENC_MAX_JOBS` | 8 | Jobs in progress at once; further clients wait |
+| `ENC_MAX_JOBS` | 8 | Jobs held at once, from accepting a Data Block until its Encrypted Block is fetched |
+| `ENC_MAX_WAITING` | 64 | ENCRYPT requests waiting for a free Job slot (their clients stay blocked); beyond this the server answers `EBUSY` |
+| `ENC_CLIENT_TIMEOUT_NS` | 10 s | A client gives up if its Encrypted Block has not arrived by then (`no Encrypted Block within 10 s`) |
 | `ENC_MAX_WORKERS` | 64 | Largest Worker Pool (`-w`) |
