@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "display.h"
+#include "sync.h"
 
 /* Set once per process by ui_init(); read-only afterwards. */
 static bool use_colour;
@@ -27,7 +28,11 @@ static void init(void)
 
 void ui_init(void)
 {
-    pthread_once(&init_once, init);
+    int err = pthread_once(&init_once, init);
+
+    if (err != 0) {
+        enc_fatal("pthread_once", err);
+    }
 }
 
 const char *ui(ui_style_t style)
@@ -142,7 +147,7 @@ void ui_progress(const char *label, uint64_t done, uint64_t total, const char *u
            UI_LABEL_WIDTH, label, ui(UI_RESET), ui(UI_CYAN),
            ui_bar(bar, sizeof bar, filled, UI_BAR_WIDTH), ui(UI_RESET), (unsigned long long)done,
            (unsigned long long)total, unit, final ? "\n" : "");
-    fflush(stdout);
+    fflush(stdout);                 /* display only: a failed flush just delays the text */
 }
 
 void ui_hex_row(const char *label, const uint8_t *bytes, size_t n)
@@ -169,7 +174,7 @@ void ui_error(const char *program, const char *fmt, ...)
 {
     va_list ap;
 
-    fflush(stdout);
+    fflush(stdout);                 /* display only: a failed flush just delays the text */
     fprintf(stderr, "%s: %s%s ", program, ui(UI_RED), ui_fail());
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);

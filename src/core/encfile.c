@@ -84,6 +84,8 @@ static size_t put(char *buf, size_t cap, size_t at, const char *fmt, ...)
     return n > 0 ? (size_t)n : 0;
 }
 
+static const char hex_digits[] = "0123456789abcdef";
+
 size_t encfile_header_format(const encfile_header_t *h, char *buf, size_t cap)
 {
     size_t len = 0;
@@ -94,13 +96,15 @@ size_t encfile_header_format(const encfile_header_t *h, char *buf, size_t cap)
     len += put(buf, cap, len, "blocks  %" PRIu32 " of up to %" PRIu32 " bytes\n",
                h->blocks, h->block_size);
     for (uint32_t i = 0; i < h->blocks; i++) {
-        char label[16], hex[2 * ENC_IV_LEN + 1];
+        char hex[2 * ENC_IV_LEN + 1];
 
-        snprintf(label, sizeof label, "iv %" PRIu32, i + 1);
         for (unsigned b = 0; b < ENC_IV_LEN; b++) {
-            snprintf(hex + 2 * b, 3, "%02x", h->ivs[i][b]);
+            hex[2 * b] = hex_digits[h->ivs[i][b] >> 4];
+            hex[2 * b + 1] = hex_digits[h->ivs[i][b] & 0x0f];
         }
-        len += put(buf, cap, len, "%-7s %s\n", label, hex);
+        hex[2 * ENC_IV_LEN] = '\0';
+        /* "iv " plus the index padded to 4 columns: the same 7-column label as before. */
+        len += put(buf, cap, len, "iv %-4" PRIu32 " %s\n", i + 1, hex);
     }
     len += put(buf, cap, len, "---\n");
     return len;
@@ -151,6 +155,7 @@ int encfile_header_read(FILE *f, encfile_header_t *h, size_t *header_len)
     unsigned long long size;
     unsigned blocks, block_size, index;
     const char *name;
+    long pos;
     int err;
 
     memset(h, 0, sizeof *h);
@@ -204,6 +209,12 @@ int encfile_header_read(FILE *f, encfile_header_t *h, size_t *header_len)
         return EINVAL;
     }
 
-    *header_len = (size_t)ftell(f);
+    pos = ftell(f);
+    if (pos < 0) {
+        err = errno != 0 ? errno : EIO;
+        encfile_header_free(h);
+        return err;
+    }
+    *header_len = (size_t)pos;
     return 0;
 }

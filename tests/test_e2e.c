@@ -16,10 +16,12 @@
 #include <sys/neutrino.h>
 
 #include "cipher.h"
+#include "client.h"
 #include "config.h"
 #include "job.h"
 #include "protocol.h"
 #include "qnx_shim.h"
+#include "sync.h"
 #include "util.h"
 
 int encserver_main(int argc, char **argv);
@@ -37,12 +39,12 @@ static pthread_mutex_t failures_mutex = PTHREAD_MUTEX_INITIALIZER;
 #define CHECK(cond, ...)                                    \
     do {                                                    \
         if (!(cond)) {                                      \
-            pthread_mutex_lock(&failures_mutex);            \
+            enc_lock(&failures_mutex);                      \
             failures++;                                     \
             fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); \
             fprintf(stderr, __VA_ARGS__);                   \
             fputc('\n', stderr);                            \
-            pthread_mutex_unlock(&failures_mutex);          \
+            enc_unlock(&failures_mutex);                    \
         }                                                   \
     } while (0)
 
@@ -77,18 +79,52 @@ static int write_file(const char *path, const uint8_t *buf, size_t len)
     return ok ? 0 : -1;
 }
 
-/* Send a hand-made request. Returns 0, or the errno that MsgSendv failed with. */
-static int raw_request(uint16_t type, uint32_t claimed_len, const uint8_t *data, size_t sent_len,
-                       encsvc_reply_t *reply, uint8_t *out, size_t out_len)
+/*
+ * Send a hand-made ENCRYPT on connection coid. Returns 0 and the Job id, or the
+ * errno that MsgSendv failed with. Without `event` the request carries an empty one.
+ */
+static int raw_encrypt(int coid, uint16_t type, uint32_t claimed_len, const uint8_t *data,
+                       size_t sent_len, const struct sigevent *event, uint32_t *job_id)
 {
-    encsvc_request_t hdr = { .type = type, .data_len = claimed_len };
-    iov_t siov[2], riov[2];
+    encsvc_encrypt_t hdr = { .type = type, .data_len = claimed_len };
+    encsvc_accepted_t accepted = { 0 };
+    iov_t siov[2], riov[1];
 
+    if (event != NULL) {
+        hdr.event = *event;
+    }
     SETIOV(&siov[0], &hdr, sizeof hdr);
     SETIOV(&siov[1], data, sent_len);
-    SETIOV(&riov[0], reply, sizeof *reply);
-    SETIOV(&riov[1], out, out_len);
-    return MsgSendv(1, siov, 2, riov, 2) == -1 ? errno : 0;
+    SETIOV(&riov[0], &accepted, sizeof accepted);
+    if (MsgSendv(coid, siov, 2, riov, 1) == -1) {
+        return errno;
+    }
+    if (job_id != NULL) {
+        *job_id = accepted.job_id;
+    }
+    return 0;
+}
+
+/* Send FETCH for job_id. Returns 0 or the errno that MsgSendv failed with. */
+static int raw_fetch(int coid, uint32_t job_id, uint8_t *out, size_t len)
+{
+    encsvc_fetch_t fetch = { .type = ENCSVC_MSG_FETCH, .job_id = job_id };
+    encsvc_result_t result;
+    iov_t siov[1], riov[2];
+
+    SETIOV(&siov[0], &fetch, sizeof fetch);
+    SETIOV(&riov[0], &result, sizeof result);
+    SETIOV(&riov[1], out, len);
+    return MsgSendv(coid, siov, 1, riov, 2) == -1 ? errno : 0;
+}
+
+/* Wait up to 5 s for the server to hold exactly `jobs` Jobs. */
+static int wait_open_jobs(unsigned jobs)
+{
+    for (int i = 0; i < 500 && shim_open_jobs() != jobs; i++) {
+        usleep(10000);
+    }
+    return shim_open_jobs() == jobs;
 }
 
 static void test_client_runs(void)
@@ -266,41 +302,157 @@ static void test_default_output_names(void)
 static void test_server_rejects_bad_requests(void)
 {
     uint8_t data[128] = { 0 }, out[128];
-    encsvc_reply_t reply;
+    int coid = name_open(ENCSVC_NAME, 0);
+    encsvc_notify_t notify;
+    encsvc_result_t result;
 
-    CHECK(raw_request(ENCSVC_MSG_ENCRYPT, 0, data, 0, &reply, out, 0) == EINVAL,
+    CHECK(raw_encrypt(coid, ENCSVC_MSG_ENCRYPT, 0, data, 0, NULL, NULL) == EINVAL,
           "empty Data Block -> EINVAL");
-    CHECK(raw_request(ENCSVC_MSG_ENCRYPT, ENC_MAX_BLOCK + 1, data, sizeof data, &reply, out,
-                      sizeof out) == EMSGSIZE, "over 2 MB -> EMSGSIZE");
-    CHECK(raw_request(ENCSVC_MSG_ENCRYPT, 100, data, 50, &reply, out, sizeof out) == EBADMSG,
+    CHECK(raw_encrypt(coid, ENCSVC_MSG_ENCRYPT, ENC_MAX_BLOCK + 1, data, sizeof data, NULL, NULL) ==
+          EMSGSIZE, "over 2 MB -> EMSGSIZE");
+    CHECK(raw_encrypt(coid, ENCSVC_MSG_ENCRYPT, 100, data, 50, NULL, NULL) == EBADMSG,
           "claims 100 bytes, sends 50 -> EBADMSG");
-    CHECK(raw_request(ENCSVC_MSG_ENCRYPT + 1, 16, data, 16, &reply, out, sizeof out) == ENOSYS,
+    CHECK(raw_encrypt(coid, ENCSVC_MSG_FETCH + 1, 16, data, 16, NULL, NULL) == ENOSYS,
           "unknown message type -> ENOSYS");
+    CHECK(raw_fetch(coid, 999999, out, sizeof out) == ENOENT, "FETCH of an unknown Job -> ENOENT");
+
     /* The server must still work after all of those. */
-    CHECK(raw_request(ENCSVC_MSG_ENCRYPT, 16, data, 16, &reply, out, 16) == 0,
+    CHECK(encsvc_notify_open(&notify, coid) == 0, "notify open");
+    CHECK(encsvc_encrypt(coid, &notify, data, out, 16, &result) == 0,
           "server still serves after errors");
+    CHECK(encsvc_notify_close(&notify) == 0, "notify close");
+    name_close(coid);
+}
+
+/* A Job can be fetched only on the connection that sent it, and only once. */
+static void test_fetch_needs_same_connection(void)
+{
+    uint8_t data[64] = { 1 }, out[64];
+    int a = name_open(ENCSVC_NAME, 0), b = name_open(ENCSVC_NAME, 0);
+    encsvc_notify_t notify;
+    uint32_t id = 0;
+    int err;
+
+    CHECK(encsvc_notify_open(&notify, a) == 0, "notify open");
+    CHECK(raw_encrypt(a, ENCSVC_MSG_ENCRYPT, sizeof data, data, sizeof data, &notify.event, &id) == 0,
+          "ENCRYPT accepted");
+    CHECK(raw_fetch(b, id, out, sizeof out) == ENOENT, "another connection cannot FETCH the Job");
+    do {
+        err = raw_fetch(a, id, out, sizeof out);     /* EAGAIN until the Job is done */
+    } while (err == EAGAIN && usleep(1000) == 0);
+    CHECK(err == 0, "the sending connection can FETCH it: %s", strerror(err));
+    CHECK(raw_fetch(a, id, out, sizeof out) == ENOENT, "a second FETCH finds nothing");
+    CHECK(encsvc_notify_close(&notify) == 0, "notify close");
+    name_close(a);
+    name_close(b);
+}
+
+/*
+ * True if the server accepts ENC_MAX_JOBS Data Blocks on a new connection
+ * without making any of them wait 2 s for a slot (then disconnects again).
+ */
+static int slots_all_free(void)
+{
+    uint8_t data[512] = { 4 };
+    int coid = name_open(ENCSVC_NAME, 0), ok = 1;
+    encsvc_notify_t notify;
+    struct sigevent unblock;
+    uint64_t ns = 2000 * 1000000ull;
+
+    if (encsvc_notify_open(&notify, coid) != 0) {
+        return 0;
+    }
+    SIGEV_UNBLOCK_INIT(&unblock);
+    for (unsigned i = 0; i < ENC_MAX_JOBS && ok; i++) {
+        ok = TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY, &unblock, &ns,
+                          NULL) == 0 &&
+             raw_encrypt(coid, ENCSVC_MSG_ENCRYPT, sizeof data, data, sizeof data, &notify.event,
+                         NULL) == 0;
+    }
+    name_close(coid);
+    ok = wait_open_jobs(0) && ok;
+    return encsvc_notify_close(&notify) == 0 && ok;
+}
+
+/* A client that goes away without FETCH leaves nothing behind (disconnect pulse). */
+static void test_disconnect_frees_jobs(void)
+{
+    uint8_t data[4096] = { 2 };
+    int coid = name_open(ENCSVC_NAME, 0);
+    encsvc_notify_t notify;
+
+    CHECK(wait_open_jobs(0), "no Jobs held before the test");
+    CHECK(encsvc_notify_open(&notify, coid) == 0, "notify open");
+    for (int i = 0; i < 3; i++) {
+        CHECK(raw_encrypt(coid, ENCSVC_MSG_ENCRYPT, sizeof data, data, sizeof data, &notify.event,
+                          NULL) == 0, "ENCRYPT %d accepted", i);
+    }
+    CHECK(shim_open_jobs() == 3, "server holds the 3 unfetched Jobs");
+    name_close(coid);
+    CHECK(wait_open_jobs(0), "disconnect frees every Job of that client (holds %u)", shim_open_jobs());
+    CHECK(encsvc_notify_close(&notify) == 0, "notify close");
+    CHECK(slots_all_free(), "after the disconnect, all %u Job slots are free again", ENC_MAX_JOBS);
+}
+
+/*
+ * With every Job slot taken, a further ENCRYPT waits. When the client's
+ * TimerTimeout expires, the server answers it with ETIMEDOUT.
+ */
+static void test_waiting_request_times_out(void)
+{
+    uint8_t data[1024] = { 3 };
+    int coid = name_open(ENCSVC_NAME, 0);
+    encsvc_notify_t notify;
+    struct sigevent unblock;
+    uint64_t ns = 200 * 1000000ull;
+    unsigned before = shim_unblock_pulses();
+
+    CHECK(wait_open_jobs(0), "no Jobs held before the test");
+    CHECK(encsvc_notify_open(&notify, coid) == 0, "notify open");
+    for (unsigned i = 0; i < ENC_MAX_JOBS; i++) {
+        CHECK(raw_encrypt(coid, ENCSVC_MSG_ENCRYPT, sizeof data, data, sizeof data, &notify.event,
+                          NULL) == 0, "ENCRYPT %u accepted", i);
+    }
+    SIGEV_UNBLOCK_INIT(&unblock);
+    CHECK(TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY, &unblock, &ns, NULL) == 0,
+          "TimerTimeout");
+    CHECK(raw_encrypt(coid, ENCSVC_MSG_ENCRYPT, sizeof data, data, sizeof data, &notify.event, NULL) ==
+          ETIMEDOUT, "a request beyond ENC_MAX_JOBS times out while waiting for a slot");
+    CHECK(shim_unblock_pulses() == before + 1, "the timeout reached the server as an unblock pulse");
+    name_close(coid);
+    CHECK(wait_open_jobs(0), "disconnect frees the held Jobs");
+    CHECK(encsvc_notify_close(&notify) == 0, "notify close");
+    CHECK(slots_all_free(), "after the disconnect, all %u Job slots are free again", ENC_MAX_JOBS);
 }
 
 static void *concurrent_client(void *arg)
 {
     unsigned id = (unsigned)(uintptr_t)arg;
+    int coid = name_open(ENCSVC_NAME, 0);
+    encsvc_notify_t notify;
 
+    CHECK(encsvc_notify_open(&notify, coid) == 0, "notify open %u", id);
     for (unsigned round = 0; round < 3; round++) {
         size_t len = 1 + (size_t)((id * 7919u + round * 104729u) * 2654435761u % ENC_MAX_BLOCK);
         uint8_t *in = malloc(len), *out = malloc(len), *ref = malloc(len);
-        encsvc_reply_t reply;
+        encsvc_result_t result;
 
-        random_bytes(in, len);
-        CHECK(raw_request(ENCSVC_MSG_ENCRYPT, (uint32_t)len, in, len, &reply, out, len) == 0,
-              "concurrent request %u/%u", id, round);
-        CHECK(reply.data_len == len, "reply length");
-        reference_encrypt(key, reply.iv, in, ref, len);
-        CHECK(memcmp(out, ref, len) == 0, "concurrent result %u/%u differs from Reference Encryption",
-              id, round);
+        CHECK(in != NULL && out != NULL && ref != NULL, "malloc");
+        if (in != NULL && out != NULL && ref != NULL) {
+            CHECK(random_bytes(in, len) == 0, "random_bytes");
+            CHECK(encsvc_encrypt(coid, &notify, in, out, len, &result) == 0,
+                  "concurrent request %u/%u", id, round);
+            CHECK(result.data_len == len, "reply length");
+            CHECK(reference_encrypt(key, result.iv, in, ref, len) == 0, "reference_encrypt");
+            CHECK(memcmp(out, ref, len) == 0,
+                  "concurrent result %u/%u differs from Reference Encryption", id, round);
+        }
         free(in);
         free(out);
         free(ref);
     }
+    CHECK(encsvc_notify_close(&notify) == 0, "notify close %u", id);
+    name_close(coid);
     return NULL;
 }
 
@@ -308,17 +460,21 @@ static void test_concurrent_clients(void)
 {
     enum { CLIENTS = 16 };
     pthread_t threads[CLIENTS];
+    unsigned started = 0;
 
     for (uintptr_t i = 0; i < CLIENTS; i++) {
-        pthread_create(&threads[i], NULL, concurrent_client, (void *)i);
+        if (pthread_create(&threads[started], NULL, concurrent_client, (void *)i) == 0) {
+            started++;
+        }
     }
-    for (unsigned i = 0; i < CLIENTS; i++) {
-        pthread_join(threads[i], NULL);
+    CHECK(started == CLIENTS, "started %u of %u client threads", started, (unsigned)CLIENTS);
+    for (unsigned i = 0; i < started; i++) {
+        enc_join(threads[i]);
     }
     printf("test_e2e: most Jobs held by the server at once: %u (limit %u)\n",
-           shim_max_in_server(), ENC_MAX_JOBS);
-    CHECK(shim_max_in_server() <= ENC_MAX_JOBS, "server held more than ENC_MAX_JOBS");
-    CHECK(shim_max_in_server() >= 2, "server never ran Jobs concurrently");
+           shim_max_open_jobs(), ENC_MAX_JOBS);
+    CHECK(shim_max_open_jobs() <= ENC_MAX_JOBS, "server held more than ENC_MAX_JOBS");
+    CHECK(shim_max_open_jobs() >= 2, "server never ran Jobs concurrently");
 }
 
 int main(void)
@@ -329,8 +485,11 @@ int main(void)
         fprintf(stderr, "cannot create %s\n", KEYFILE);
         return 1;
     }
-    pthread_create(&server, NULL, server_thread, NULL);
-    name_open(ENCSVC_NAME, 0);      /* waits until the server has attached */
+    if (pthread_create(&server, NULL, server_thread, NULL) != 0) {
+        fprintf(stderr, "cannot start the server thread\n");
+        return 1;
+    }
+    name_close(name_open(ENCSVC_NAME, 0));     /* waits until the server has attached */
 
     test_client_runs();
     test_file_round_trip();
@@ -338,6 +497,9 @@ int main(void)
     test_decrypt_refuses_bad_input();
     test_default_output_names();
     test_server_rejects_bad_requests();
+    test_fetch_needs_same_connection();
+    test_disconnect_frees_jobs();
+    test_waiting_request_times_out();
     test_concurrent_clients();
 
     printf("test_e2e [%s]: %s\n", cipher_backend_name(), failures ? "FAILED" : "passed");

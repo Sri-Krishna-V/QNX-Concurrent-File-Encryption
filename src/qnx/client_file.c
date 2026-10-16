@@ -3,8 +3,8 @@
  *
  * Encrypting: the file is split into Data Blocks of up to ENC_MAX_BLOCK bytes.
  * A few sender threads (-j, default 4) each take the next Data Block, send it
- * to the server and write its Encrypted Block into place, so several Jobs are
- * in progress on the server at once. The main thread waits on a condition
+ * to the server (client_msg.c) and write its Encrypted Block into place, so
+ * several Jobs are in progress on the server at once. The main thread waits on a condition
  * variable and redraws the progress bar each time a Data Block comes back.
  * When all are done it writes the readable header (see encfile.h) in front.
  *
@@ -28,25 +28,10 @@
 #include "display.h"
 #include "encfile.h"
 #include "job.h"
+#include "sync.h"
 #include "util.h"
 
 #define PREVIEW_LEN 16
-
-int encsvc_encrypt(int coid, const uint8_t *data, uint8_t *encrypted, size_t len,
-                   encsvc_reply_t *reply)
-{
-    encsvc_request_t hdr = { .type = ENCSVC_MSG_ENCRYPT, .data_len = (uint32_t)len };
-    iov_t siov[2], riov[2];
-
-    SETIOV(&siov[0], &hdr, sizeof hdr);
-    SETIOV(&siov[1], (void *)data, len);
-    SETIOV(&riov[0], reply, sizeof *reply);
-    SETIOV(&riov[1], encrypted, len);
-    if (MsgSendv(coid, siov, 2, riov, 2) == -1) {
-        return errno;
-    }
-    return reply->data_len == len ? 0 : EBADMSG;
-}
 
 static int pread_full(int fd, uint8_t *buf, size_t len, off_t at)
 {
@@ -82,6 +67,28 @@ static int pwrite_full(int fd, const uint8_t *buf, size_t len, off_t at)
     return 0;
 }
 
+/*
+ * Close a file opened only for reading. Nothing was written to it, so a failed
+ * close loses no data and there is nothing to report.
+ */
+static void close_read_only(int fd)
+{
+    (void)close(fd);
+}
+
+static void fclose_read_only(FILE *f)
+{
+    (void)fclose(f);
+}
+
+/* Remove a half-written output file; say so if that fails, so the user can delete it. */
+static void remove_partial(const char *path)
+{
+    if (unlink(path) != 0 && errno != ENOENT) {
+        ui_error("encclient", "could not remove the incomplete %s: %s", path, strerror(errno));
+    }
+}
+
 /* "examples/photo.png" -> "photo.png" */
 static const char *base_name(const char *path)
 {
@@ -115,8 +122,8 @@ typedef struct {
 } encrypt_run_t;
 
 /* Encrypt Data Block i. buf_in, buf_out and scratch each hold one Data Block. */
-static int encrypt_block(encrypt_run_t *run, uint32_t i, uint8_t *buf_in, uint8_t *buf_out,
-                         uint8_t *scratch, encsvc_reply_t *reply)
+static int encrypt_block(encrypt_run_t *run, const encsvc_notify_t *notify, uint32_t i,
+                         uint8_t *buf_in, uint8_t *buf_out, uint8_t *scratch, encsvc_result_t *reply)
 {
     size_t len = encfile_block_len(run->header, i);
     off_t at = (off_t)i * run->header->block_size;
@@ -124,12 +131,12 @@ static int encrypt_block(encrypt_run_t *run, uint32_t i, uint8_t *buf_in, uint8_
 
     err = pread_full(run->in_fd, buf_in, len, at);
     if (err == 0) {
-        err = encsvc_encrypt(run->coid, buf_in, buf_out, len, reply);
+        err = encsvc_encrypt(run->coid, notify, buf_in, buf_out, len, reply);
     }
     if (err == 0 && run->opt->verify &&
         (reference_encrypt(run->opt->key, reply->iv, buf_in, scratch, len) != 0 ||
          memcmp(scratch, buf_out, len) != 0)) {
-        err = EIO;                  /* differs from the Reference Encryption */
+        err = EILSEQ;               /* our marker for: differs from the Reference Encryption */
     }
     if (err == 0) {
         err = pwrite_full(run->out_fd, buf_out, len, (off_t)run->header_len + at);
@@ -146,27 +153,33 @@ static void *sender_thread(void *arg)
     size_t cap = run->header->block_size;
     uint8_t *buf_in = malloc(cap), *buf_out = malloc(cap);
     uint8_t *scratch = run->opt->verify ? malloc(cap) : NULL;
-    int err = (buf_in == NULL || buf_out == NULL || (run->opt->verify && scratch == NULL))
-                  ? ENOMEM : 0;
+    int close_err, err = (buf_in == NULL || buf_out == NULL || (run->opt->verify && scratch == NULL))
+                             ? ENOMEM : 0;
+    encsvc_notify_t notify;
+    bool notify_open = false;
     uint32_t i = 0;
 
+    if (err == 0) {
+        err = encsvc_notify_open(&notify, run->coid);
+        notify_open = err == 0;
+    }
     while (err == 0) {
-        encsvc_reply_t reply;
+        encsvc_result_t reply;
 
-        pthread_mutex_lock(&run->mutex);
+        enc_lock(&run->mutex);
         if (run->err != 0 || run->next_block >= run->header->blocks) {
-            pthread_mutex_unlock(&run->mutex);
+            enc_unlock(&run->mutex);
             break;
         }
         i = run->next_block++;
-        pthread_mutex_unlock(&run->mutex);
+        enc_unlock(&run->mutex);
 
-        err = encrypt_block(run, i, buf_in, buf_out, scratch, &reply);
+        err = encrypt_block(run, &notify, i, buf_in, buf_out, scratch, &reply);
         if (err != 0) {
             break;
         }
 
-        pthread_mutex_lock(&run->mutex);
+        enc_lock(&run->mutex);
         run->done_blocks++;
         run->server_ns += reply.encryption_ns;
         run->segments += reply.segments;
@@ -175,18 +188,24 @@ static void *sender_thread(void *arg)
             memcpy(run->preview_in, buf_in, PREVIEW_LEN);
             memcpy(run->preview_out, buf_out, PREVIEW_LEN);
         }
-        pthread_cond_signal(&run->progress_cv);
-        pthread_mutex_unlock(&run->mutex);
+        enc_cond_signal(&run->progress_cv);
+        enc_unlock(&run->mutex);
+    }
+    if (notify_open) {
+        close_err = encsvc_notify_close(&notify);
+        if (err == 0) {
+            err = close_err;
+        }
     }
 
-    pthread_mutex_lock(&run->mutex);
+    enc_lock(&run->mutex);
     if (err != 0 && run->err == 0) {
         run->err = err;
         run->err_block = i;
     }
     run->running--;
-    pthread_cond_signal(&run->progress_cv);
-    pthread_mutex_unlock(&run->mutex);
+    enc_cond_signal(&run->progress_cv);
+    enc_unlock(&run->mutex);
 
     free(buf_in);
     free(buf_out);
@@ -210,7 +229,7 @@ static int run_senders(encrypt_run_t *run)
         return ENOMEM;
     }
 
-    pthread_mutex_lock(&run->mutex);
+    enc_lock(&run->mutex);
     for (; started < threads; started++) {
         if (pthread_create(&tids[started], NULL, sender_thread, run) != 0) {
             break;
@@ -222,13 +241,13 @@ static int run_senders(encrypt_run_t *run)
     }
     while (run->running > 0) {
         ui_progress("progress", run->done_blocks, run->header->blocks, "Data Blocks");
-        pthread_cond_wait(&run->progress_cv, &run->mutex);
+        enc_cond_wait(&run->progress_cv, &run->mutex);
     }
     err = run->err;
-    pthread_mutex_unlock(&run->mutex);
+    enc_unlock(&run->mutex);
 
     for (unsigned t = 0; t < started; t++) {
-        pthread_join(tids[t], NULL);
+        enc_join(tids[t]);
     }
     free(tids);
     if (err == 0) {
@@ -261,11 +280,14 @@ int encrypt_file(int coid, const char *in_path, const file_options_t *opt)
     run.in_fd = open(in_path, O_RDONLY);
     if (run.in_fd < 0 || fstat(run.in_fd, &st) != 0) {
         ui_error("encclient", "cannot open %s: %s", in_path, strerror(errno));
+        if (run.in_fd >= 0) {
+            close_read_only(run.in_fd);
+        }
         return 1;
     }
     if (!S_ISREG(st.st_mode)) {
         ui_error("encclient", "%s is not a regular file", in_path);
-        close(run.in_fd);
+        close_read_only(run.in_fd);
         return 1;
     }
     if (out_path == NULL) {
@@ -274,14 +296,14 @@ int encrypt_file(int coid, const char *in_path, const file_options_t *opt)
     }
     if (same_inode(in_path, out_path)) {
         ui_error("encclient", "%s would overwrite the file being encrypted", out_path);
-        close(run.in_fd);
+        close_read_only(run.in_fd);
         return 1;
     }
 
     err = encfile_header_init(&header, in_path, (uint64_t)st.st_size, ENC_MAX_BLOCK);
     if (err != 0) {
         ui_error("encclient", "%s: %s", in_path, strerror(err));
-        close(run.in_fd);
+        close_read_only(run.in_fd);
         return 1;
     }
     run.header = &header;
@@ -302,20 +324,23 @@ int encrypt_file(int coid, const char *in_path, const file_options_t *opt)
         goto out;
     }
     created = true;
-    pthread_mutex_init(&run.mutex, NULL);
-    pthread_cond_init(&run.progress_cv, NULL);
+    err = enc_mutex_cond_init(&run.mutex, &run.progress_cv);
+    if (err != 0) {
+        ui_error("encclient", "cannot set up the sender threads: %s", strerror(err));
+        goto out;
+    }
 
     start = now_ns();
     err = run_senders(&run);
     wall = now_ns() - start;
 
-    pthread_cond_destroy(&run.progress_cv);
-    pthread_mutex_destroy(&run.mutex);
+    enc_cond_destroy(&run.progress_cv);
+    enc_mutex_destroy(&run.mutex);
 
     if (err != 0) {
-        ui_error("encclient", "Data Block %u failed: %s%s", run.err_block + 1,
-                 err == EIO && opt->verify ? "differs from the Reference Encryption" : strerror(err),
-                 err == ENOENT || err == EBADF ? " (is encserver running?)" : "");
+        ui_error("encclient", "Data Block %u failed: %s", run.err_block + 1,
+                 err == EILSEQ ? "differs from the Reference Encryption"
+                                           : encsvc_strerror(err));
         goto out;
     }
 
@@ -323,10 +348,11 @@ int encrypt_file(int coid, const char *in_path, const file_options_t *opt)
     header_text = malloc(run.header_len + 1);
     if (header_text == NULL) {
         err = ENOMEM;
-        goto out;
+    } else if (encfile_header_format(&header, header_text, run.header_len + 1) != run.header_len) {
+        err = EIO;                  /* cannot happen: the same header, formatted twice */
+    } else {
+        err = pwrite_full(run.out_fd, (const uint8_t *)header_text, run.header_len, 0);
     }
-    encfile_header_format(&header, header_text, run.header_len + 1);
-    err = pwrite_full(run.out_fd, (const uint8_t *)header_text, run.header_len, 0);
     if (close(run.out_fd) != 0 && err == 0) {
         err = errno;
     }
@@ -359,12 +385,12 @@ int encrypt_file(int coid, const char *in_path, const file_options_t *opt)
 
 out:
     if (run.out_fd >= 0) {
-        close(run.out_fd);
+        (void)close(run.out_fd);    /* only on a failure path: the file is removed next */
     }
     if (err != 0 && created) {
-        unlink(out_path);           /* never leave half an Encrypted File behind */
+        remove_partial(out_path);   /* never leave half an Encrypted File behind */
     }
-    close(run.in_fd);
+    close_read_only(run.in_fd);
     free(header_text);
     encfile_header_free(&header);
     return err == 0 ? 0 : 1;
@@ -388,7 +414,7 @@ int decrypt_file(const char *in_path, const file_options_t *opt)
     if (in == NULL || fstat(fileno(in), &st) != 0) {
         ui_error("encclient", "cannot open %s: %s", in_path, strerror(errno));
         if (in != NULL) {
-            fclose(in);
+            fclose_read_only(in);
         }
         return 1;
     }
@@ -396,7 +422,7 @@ int decrypt_file(const char *in_path, const file_options_t *opt)
     if (err != 0) {
         ui_error("encclient", "%s is not an Encrypted File (it must start with \"%s\")", in_path,
                  ENCFILE_MAGIC);
-        fclose(in);
+        fclose_read_only(in);
         return 1;
     }
     if ((uint64_t)st.st_size != header_len + header.size) {
@@ -404,7 +430,7 @@ int decrypt_file(const char *in_path, const file_options_t *opt)
                  in_path, ui_count(a, sizeof a, header.size),
                  ui_count(b, sizeof b, (uint64_t)st.st_size > header_len ? (uint64_t)st.st_size - header_len : 0));
         encfile_header_free(&header);
-        fclose(in);
+        fclose_read_only(in);
         return 1;
     }
     if (out_path == NULL) {
@@ -426,7 +452,7 @@ int decrypt_file(const char *in_path, const file_options_t *opt)
             ui_error("encclient", "cannot create %s: %s", out_path, strerror(err));
         }
         encfile_header_free(&header);
-        fclose(in);
+        fclose_read_only(in);
         return 1;
     }
 
@@ -462,7 +488,7 @@ int decrypt_file(const char *in_path, const file_options_t *opt)
             putchar('\n');
         }
         ui_error("encclient", "cannot decrypt %s: %s", in_path, strerror(err));
-        unlink(out_path);
+        remove_partial(out_path);
     } else {
         if (header.blocks == 0) {
             ui_progress("progress", 0, 0, "Data Blocks");
@@ -483,6 +509,6 @@ int decrypt_file(const char *in_path, const file_options_t *opt)
     free(buf_in);
     free(buf_out);
     encfile_header_free(&header);
-    fclose(in);
+    fclose_read_only(in);
     return err == 0 ? 0 : 1;
 }

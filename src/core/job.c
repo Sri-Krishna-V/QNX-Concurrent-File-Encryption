@@ -8,6 +8,7 @@
 #include "cipher.h"
 #include "job.h"
 #include "segment.h"
+#include "sync.h"
 #include "util.h"
 
 typedef struct {
@@ -22,7 +23,7 @@ static void commit_segment(task_t *task, const uint8_t *scratch, int status, int
 {
     job_t *job = task->job;
 
-    pthread_mutex_lock(&job->mutex);
+    enc_lock(&job->mutex);
     if (worker >= 0 && (unsigned)worker < ENC_MAX_WORKERS) {
         job->worker_segments[worker]++;
     }
@@ -34,9 +35,9 @@ static void commit_segment(task_t *task, const uint8_t *scratch, int status, int
     job->completed_count++;
     if (job->completed_count == job->total_segments) {
         job->finish_ns = now_ns();
-        pthread_cond_signal(&job->done_cv);
+        enc_cond_signal(&job->done_cv);
     }
-    pthread_mutex_unlock(&job->mutex);
+    enc_unlock(&job->mutex);
 }
 
 /* Runs on a worker thread. Encrypts into private memory, so no lock is held here. */
@@ -67,14 +68,7 @@ int job_init(job_t *job, const uint8_t *key, const uint8_t iv[ENC_IV_LEN],
     job->output = output;
     job->len = len;
 
-    if (pthread_mutex_init(&job->mutex, NULL) != 0) {
-        return EAGAIN;
-    }
-    if (pthread_cond_init(&job->done_cv, NULL) != 0) {
-        pthread_mutex_destroy(&job->mutex);
-        return EAGAIN;
-    }
-    return 0;
+    return enc_mutex_cond_init(&job->mutex, &job->done_cv);
 }
 
 int job_run(job_t *job, worker_pool_t *pool)
@@ -110,13 +104,13 @@ int job_run(job_t *job, worker_pool_t *pool)
         pool_submit(pool, &tasks[i].work);
     }
 
-    pthread_mutex_lock(&job->mutex);
+    enc_lock(&job->mutex);
     while (job->completed_count < job->total_segments) {
-        pthread_cond_wait(&job->done_cv, &job->mutex);
+        enc_cond_wait(&job->done_cv, &job->mutex);
     }
     err = job->error;
     job->encryption_ns = job->finish_ns - start_ns;
-    pthread_mutex_unlock(&job->mutex);
+    enc_unlock(&job->mutex);
 
     free(tasks);
     return err;
@@ -124,8 +118,8 @@ int job_run(job_t *job, worker_pool_t *pool)
 
 void job_destroy(job_t *job)
 {
-    pthread_cond_destroy(&job->done_cv);
-    pthread_mutex_destroy(&job->mutex);
+    enc_cond_destroy(&job->done_cv);
+    enc_mutex_destroy(&job->mutex);
 }
 
 int reference_encrypt(const uint8_t *key, const uint8_t iv[ENC_IV_LEN],

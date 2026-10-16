@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "aes256.h"
+#include "sync.h"
 
 static uint8_t sbox[256];
 static pthread_once_t sbox_once = PTHREAD_ONCE_INIT;
@@ -62,8 +63,11 @@ void aes256_init(aes256_ctx_t *ctx, const uint8_t key[32])
 {
     uint8_t *w = ctx->round_key;
     uint8_t rcon = 0x01;
+    int err = pthread_once(&sbox_once, sbox_build);
 
-    pthread_once(&sbox_once, sbox_build);
+    if (err != 0) {
+        enc_fatal("pthread_once", err);
+    }
 
     memcpy(w, key, 32);
     for (unsigned i = 8; i < 4 * (AES256_ROUNDS + 1); i++) {

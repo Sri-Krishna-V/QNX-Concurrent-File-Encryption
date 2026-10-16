@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
+#include "sync.h"
 #include "worker_pool.h"
 
 typedef struct {
@@ -47,13 +48,13 @@ static void *worker_loop(void *arg)
     for (;;) {
         pool_work_t *work;
 
-        pthread_mutex_lock(&pool->queue_mutex);
+        enc_lock(&pool->queue_mutex);
         while (pool->head == NULL && !pool->shutdown) {
-            pthread_cond_wait(&pool->not_empty_cv, &pool->queue_mutex);
+            enc_cond_wait(&pool->not_empty_cv, &pool->queue_mutex);
         }
         if (pool->head == NULL) {
             /* Shutdown requested and nothing left to do. */
-            pthread_mutex_unlock(&pool->queue_mutex);
+            enc_unlock(&pool->queue_mutex);
             return NULL;
         }
         work = pool->head;
@@ -61,7 +62,7 @@ static void *worker_loop(void *arg)
         if (pool->head == NULL) {
             pool->tail = NULL;
         }
-        pthread_mutex_unlock(&pool->queue_mutex);
+        enc_unlock(&pool->queue_mutex);
 
         work->next = NULL;
         work->run(work);
@@ -87,8 +88,12 @@ worker_pool_t *pool_create(unsigned num_workers)
         free(pool);
         return NULL;
     }
-    pthread_mutex_init(&pool->queue_mutex, NULL);
-    pthread_cond_init(&pool->not_empty_cv, NULL);
+    if (enc_mutex_cond_init(&pool->queue_mutex, &pool->not_empty_cv) != 0) {
+        free(pool->threads);
+        free(pool->args);
+        free(pool);
+        return NULL;
+    }
 
     for (unsigned i = 0; i < num_workers; i++) {
         pool->args[i].pool = pool;
@@ -107,15 +112,15 @@ void pool_submit(worker_pool_t *pool, pool_work_t *work)
 {
     work->next = NULL;
 
-    pthread_mutex_lock(&pool->queue_mutex);
+    enc_lock(&pool->queue_mutex);
     if (pool->tail == NULL) {
         pool->head = work;
     } else {
         pool->tail->next = work;
     }
     pool->tail = work;
-    pthread_cond_signal(&pool->not_empty_cv);
-    pthread_mutex_unlock(&pool->queue_mutex);
+    enc_cond_signal(&pool->not_empty_cv);
+    enc_unlock(&pool->queue_mutex);
 }
 
 unsigned pool_size(const worker_pool_t *pool)
@@ -125,16 +130,16 @@ unsigned pool_size(const worker_pool_t *pool)
 
 void pool_destroy(worker_pool_t *pool)
 {
-    pthread_mutex_lock(&pool->queue_mutex);
+    enc_lock(&pool->queue_mutex);
     pool->shutdown = true;
-    pthread_cond_broadcast(&pool->not_empty_cv);
-    pthread_mutex_unlock(&pool->queue_mutex);
+    enc_cond_broadcast(&pool->not_empty_cv);
+    enc_unlock(&pool->queue_mutex);
 
     for (unsigned i = 0; i < pool->num_workers; i++) {
-        pthread_join(pool->threads[i], NULL);
+        enc_join(pool->threads[i]);
     }
-    pthread_cond_destroy(&pool->not_empty_cv);
-    pthread_mutex_destroy(&pool->queue_mutex);
+    enc_cond_destroy(&pool->not_empty_cv);
+    enc_mutex_destroy(&pool->queue_mutex);
     free(pool->threads);
     free(pool->args);
     free(pool);

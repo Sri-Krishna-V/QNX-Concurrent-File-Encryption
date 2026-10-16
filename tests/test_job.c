@@ -4,6 +4,7 @@
  * Every Job result is compared with the Reference Encryption.
  */
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,7 @@
 #include "config.h"
 #include "job.h"
 #include "segment.h"
+#include "sync.h"
 #include "worker_pool.h"
 
 static int failures;
@@ -20,12 +22,12 @@ static pthread_mutex_t failures_mutex = PTHREAD_MUTEX_INITIALIZER;
 #define CHECK(cond, ...)                                    \
     do {                                                    \
         if (!(cond)) {                                      \
-            pthread_mutex_lock(&failures_mutex);            \
+            enc_lock(&failures_mutex);                      \
             failures++;                                     \
             fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); \
             fprintf(stderr, __VA_ARGS__);                   \
             fputc('\n', stderr);                            \
-            pthread_mutex_unlock(&failures_mutex);          \
+            enc_unlock(&failures_mutex);                    \
         }                                                   \
     } while (0)
 
@@ -72,12 +74,19 @@ static void check_one_job(worker_pool_t *pool, size_t len, uint32_t seed)
     uint8_t *in = malloc(len), *out = malloc(len), *ref = malloc(len);
     job_t job;
 
+    if (in == NULL || out == NULL || ref == NULL) {
+        CHECK(0, "malloc for len %zu", len);
+        goto done;
+    }
     fill_pattern(key, sizeof key, seed);
     fill_pattern(iv, sizeof iv, seed + 1);
     fill_pattern(in, len, seed + 2);
     memset(out, 0, len);
 
-    CHECK(job_init(&job, key, iv, in, out, len) == 0, "job_init");
+    if (job_init(&job, key, iv, in, out, len) != 0) {
+        CHECK(0, "job_init");
+        goto done;
+    }
     CHECK(job_run(&job, pool) == 0, "job_run len %zu", len);
     CHECK(reference_encrypt(key, iv, in, ref, len) == 0, "reference_encrypt");
     CHECK(memcmp(out, ref, len) == 0, "Job differs from Reference Encryption (len %zu, %u workers)",
@@ -85,6 +94,7 @@ static void check_one_job(worker_pool_t *pool, size_t len, uint32_t seed)
     CHECK(job.completed_count == job.total_segments, "completed_count");
     job_destroy(&job);
 
+done:
     free(in);
     free(out);
     free(ref);
@@ -97,7 +107,10 @@ static void test_jobs_match_reference(void)
 
     for (size_t w = 0; w < sizeof workers / sizeof workers[0]; w++) {
         worker_pool_t *pool = pool_create(workers[w]);
-        CHECK(pool != NULL, "pool_create(%u)", workers[w]);
+        if (pool == NULL) {
+            CHECK(0, "pool_create(%u)", workers[w]);
+            continue;
+        }
         for (size_t i = 0; i < sizeof lens / sizeof lens[0]; i++) {
             check_one_job(pool, lens[i], (uint32_t)(i * 31 + w));
         }
@@ -111,7 +124,15 @@ static void test_empty_job_rejected(void)
     uint8_t key[ENC_KEY_LEN] = { 0 }, iv[ENC_IV_LEN] = { 0 }, byte = 0;
     job_t job;
 
-    job_init(&job, key, iv, &byte, &byte, 0);
+    if (pool == NULL) {
+        CHECK(0, "pool_create(2)");
+        return;
+    }
+    if (job_init(&job, key, iv, &byte, &byte, 0) != 0) {
+        CHECK(0, "job_init");
+        pool_destroy(pool);
+        return;
+    }
     CHECK(job_run(&job, pool) != 0, "empty Data Block must be rejected");
     job_destroy(&job);
     pool_destroy(pool);
@@ -139,14 +160,25 @@ static void test_concurrent_jobs(void)
     worker_pool_t *pool = pool_create(4);
     pthread_t threads[ENC_MAX_JOBS];
     coordinator_arg_t args[ENC_MAX_JOBS];
+    bool started[ENC_MAX_JOBS] = { false };
 
-    for (unsigned i = 0; i < ENC_MAX_JOBS; i++) {
-        args[i].pool = pool;
-        args[i].id = i;
-        pthread_create(&threads[i], NULL, coordinator, &args[i]);
+    if (pool == NULL) {
+        CHECK(0, "pool_create(4)");
+        return;
     }
     for (unsigned i = 0; i < ENC_MAX_JOBS; i++) {
-        pthread_join(threads[i], NULL);
+        int err;
+
+        args[i].pool = pool;
+        args[i].id = i;
+        err = pthread_create(&threads[i], NULL, coordinator, &args[i]);
+        CHECK(err == 0, "pthread_create: %s", strerror(err));
+        started[i] = err == 0;
+    }
+    for (unsigned i = 0; i < ENC_MAX_JOBS; i++) {
+        if (started[i]) {
+            enc_join(threads[i]);
+        }
     }
     pool_destroy(pool);
 }

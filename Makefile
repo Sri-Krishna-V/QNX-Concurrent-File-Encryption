@@ -17,8 +17,9 @@ QCC         ?= qcc
 HOSTCC      ?= gcc
 
 CORE_SRC   := src/core/cipher_common.c src/core/worker_pool.c src/core/segment.c \
-              src/core/job.c src/core/util.c src/core/display.c src/core/encfile.c
-CLIENT_SRC := src/qnx/client.c src/qnx/client_file.c
+              src/core/job.c src/core/util.c src/core/display.c src/core/encfile.c \
+              src/core/sync.c
+CLIENT_SRC := src/qnx/client.c src/qnx/client_file.c src/qnx/client_msg.c
 ifeq ($(CRYPTO),builtin)
 CIPHER_SRC := src/core/cipher_builtin.c src/core/aes256.c
 CRYPTO_LIB :=
@@ -67,9 +68,10 @@ define host_tests
 	$(HOSTCC) $(HOST_CFLAGS) $(1) $(E2E_INC) -Dmain=encclient_main -c src/qnx/client.c \
 		-o $(HOST_OUT)/e2e_client.o
 	$(HOSTCC) $(HOST_CFLAGS) $(1) $(E2E_INC) -c src/qnx/client_file.c -o $(HOST_OUT)/e2e_client_file.o
+	$(HOSTCC) $(HOST_CFLAGS) $(1) $(E2E_INC) -c src/qnx/client_msg.c -o $(HOST_OUT)/e2e_client_msg.o
 	$(HOSTCC) $(HOST_CFLAGS) $(1) $(E2E_INC) -o $(HOST_OUT)/test_e2e tests/test_e2e.c \
 		tests/qnx_shim.c $(HOST_OUT)/e2e_server.o $(HOST_OUT)/e2e_client.o \
-		$(HOST_OUT)/e2e_client_file.o \
+		$(HOST_OUT)/e2e_client_file.o $(HOST_OUT)/e2e_client_msg.o \
 		$(CORE_SRC) src/core/cipher_openssl.c -lcrypto
 	$(2) $(HOST_OUT)/test_e2e > $(HOST_OUT)/test_e2e.log || (cat $(HOST_OUT)/test_e2e.log; false)
 	tail -n 2 $(HOST_OUT)/test_e2e.log
@@ -90,6 +92,7 @@ qnx-syntax:
 	$(HOSTCC) $(COMMON_CFLAGS) -fsyntax-only -Isrc/qnx -Itests/qnx_stub -D__QNX__ src/qnx/server.c
 	$(HOSTCC) $(COMMON_CFLAGS) -fsyntax-only -Isrc/qnx -Itests/qnx_stub -D__QNX__ src/qnx/client.c
 	$(HOSTCC) $(COMMON_CFLAGS) -fsyntax-only -Isrc/qnx -Itests/qnx_stub -D__QNX__ src/qnx/client_file.c
+	$(HOSTCC) $(COMMON_CFLAGS) -fsyntax-only -Isrc/qnx -Itests/qnx_stub -D__QNX__ src/qnx/client_msg.c
 	@echo "QNX sources compile-check: passed"
 
 # ---------------------------------------------------------------- deploy to the Pi

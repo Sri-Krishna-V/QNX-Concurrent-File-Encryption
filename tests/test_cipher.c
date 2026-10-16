@@ -68,6 +68,10 @@ static void test_pieces_match_whole(void)
     uint8_t *in = malloc(len), *whole = malloc(len), *pieces = malloc(len);
     const size_t piece_sizes[] = { 16, 48, 4096, 16384, 65536, 131072 };
 
+    if (in == NULL || whole == NULL || pieces == NULL) {
+        CHECK(0, "malloc");
+        goto done;
+    }
     fill_pattern(key, sizeof key, 1);
     memset(iv, 0xff, sizeof iv);    /* counter wraps inside the message */
     iv[0] = 0x7f;
@@ -82,6 +86,7 @@ static void test_pieces_match_whole(void)
         }
         CHECK(memcmp(whole, pieces, len) == 0, "pieces of %zu bytes differ from whole", piece_sizes[p]);
     }
+done:
     free(in);
     free(whole);
     free(pieces);
@@ -113,20 +118,40 @@ static int dump(const char *path)
     const size_t len = 1024 * 1024 + 5;
     uint8_t key[ENC_KEY_LEN], iv[ENC_IV_LEN];
     uint8_t *in = malloc(len), *out = malloc(len);
-    FILE *f = fopen(path, "wb");
+    FILE *f = NULL;
+    int rc = 1;
 
+    if (in == NULL || out == NULL) {
+        perror("malloc");
+        goto done;
+    }
+    f = fopen(path, "wb");
+    if (f == NULL) {
+        perror(path);
+        goto done;
+    }
     fill_pattern(key, sizeof key, 10);
     memset(iv, 0xfe, sizeof iv);
     fill_pattern(in, len, 11);
-    if (f == NULL || cipher_ctr(key, iv, 0, in, out, len) != 0 ||
-        fwrite(out, 1, len, f) != len) {
-        perror(path);
-        return 1;
+    if (cipher_ctr(key, iv, 0, in, out, len) != 0) {
+        fprintf(stderr, "%s: cipher_ctr failed\n", path);
+        goto done;
     }
-    fclose(f);
+    if (fwrite(out, 1, len, f) != len) {
+        perror(path);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    /* A failed fclose on a file we wrote means the data may not be on disk. */
+    if (f != NULL && fclose(f) != 0) {
+        perror(path);
+        rc = 1;
+    }
     free(in);
     free(out);
-    return 0;
+    return rc;
 }
 
 int main(int argc, char **argv)

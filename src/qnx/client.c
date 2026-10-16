@@ -6,10 +6,11 @@
  *   encclient -d file.enc [-o out] [-x]             decrypt it again -> file
  *   encclient -s bytes [-n runs] [-W warmups] [-V] [-c csv] [-S]   benchmark
  *
- * File mode is in client_file.c. The benchmark sends one random Data Block per
- * run. Each request is asynchronous for the client: a sender thread makes the
- * blocking MsgSendv call, and the main thread is notified through a condition
- * variable when the reply arrives.
+ * File mode is in client_file.c, the protocol in client_msg.c. The benchmark
+ * sends one random Data Block per run. Each request is asynchronous for the
+ * client: a sender thread does the exchange with the server (ENCRYPT, wait for
+ * the server's pulse, FETCH), and the main thread is notified through a
+ * condition variable when the Encrypted Block has arrived.
  *
  * A benchmark result is checked two ways:
  *   1. it must equal the Reference Encryption of the Data Block, and
@@ -34,6 +35,7 @@
 #include "display.h"
 #include "job.h"
 #include "protocol.h"
+#include "sync.h"
 #include "util.h"
 
 /* One in-flight request, shared between the main thread and its sender thread. */
@@ -49,7 +51,7 @@ typedef struct {
     bool done;                      /* guarded by mutex */
 
     /* Written by the sender thread before done is set. */
-    encsvc_reply_t reply;
+    encsvc_result_t reply;
     int err;
     uint64_t round_trip_ns;         /* Round-Trip Time */
 } request_t;
@@ -57,30 +59,49 @@ typedef struct {
 static void *sender_thread(void *arg)
 {
     request_t *req = arg;
-    uint64_t start = now_ns();
-    int err = encsvc_encrypt(req->coid, req->data, req->encrypted, req->len, &req->reply);
+    encsvc_notify_t notify;
+    uint64_t start;
+    int close_err, err = encsvc_notify_open(&notify, req->coid);
 
-    req->round_trip_ns = now_ns() - start;
+    if (err == 0) {
+        start = now_ns();
+        err = encsvc_encrypt(req->coid, &notify, req->data, req->encrypted, req->len, &req->reply);
+        req->round_trip_ns = now_ns() - start;
+        close_err = encsvc_notify_close(&notify);
+        if (err == 0) {
+            err = close_err;
+        }
+    }
     req->err = err;
 
-    pthread_mutex_lock(&req->mutex);
+    enc_lock(&req->mutex);
     req->done = true;
-    pthread_cond_signal(&req->done_cv);
-    pthread_mutex_unlock(&req->mutex);
+    enc_cond_signal(&req->done_cv);
+    enc_unlock(&req->mutex);
     return NULL;
 }
 
+/* Start the sender thread for one request. Returns 0 or an errno value. */
 static int request_start(request_t *req, int coid, const uint8_t *data, size_t len,
                          uint8_t *encrypted)
 {
+    int err;
+
     memset(req, 0, sizeof *req);
     req->coid = coid;
     req->data = data;
     req->len = len;
     req->encrypted = encrypted;
-    pthread_mutex_init(&req->mutex, NULL);
-    pthread_cond_init(&req->done_cv, NULL);
-    return pthread_create(&req->sender, NULL, sender_thread, req);
+    err = enc_mutex_cond_init(&req->mutex, &req->done_cv);
+    if (err != 0) {
+        return err;
+    }
+    err = pthread_create(&req->sender, NULL, sender_thread, req);
+    if (err != 0) {
+        enc_cond_destroy(&req->done_cv);
+        enc_mutex_destroy(&req->mutex);
+    }
+    return err;
 }
 
 /*
@@ -91,17 +112,19 @@ static unsigned request_wait(request_t *req, bool show_ticks)
 {
     unsigned ticks = 0;
 
-    pthread_mutex_lock(&req->mutex);
+    enc_lock(&req->mutex);
     while (!req->done) {
         struct timespec deadline;
 
-        clock_gettime(CLOCK_REALTIME, &deadline);
+        if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+            enc_fatal("clock_gettime", errno);
+        }
         deadline.tv_nsec += 5 * 1000 * 1000;
         if (deadline.tv_nsec >= 1000000000L) {
             deadline.tv_sec++;
             deadline.tv_nsec -= 1000000000L;
         }
-        if (pthread_cond_timedwait(&req->done_cv, &req->mutex, &deadline) == ETIMEDOUT) {
+        if (enc_cond_timedwait(&req->done_cv, &req->mutex, &deadline) == ETIMEDOUT) {
             ticks++;
             if (show_ticks && ui_live()) {
                 printf("\r  %s%-12s%s free while waiting: %u tick%s of 5 ms", ui(UI_DIM),
@@ -110,11 +133,11 @@ static unsigned request_wait(request_t *req, bool show_ticks)
             }
         }
     }
-    pthread_mutex_unlock(&req->mutex);
+    enc_unlock(&req->mutex);
 
-    pthread_join(req->sender, NULL);
-    pthread_cond_destroy(&req->done_cv);
-    pthread_mutex_destroy(&req->mutex);
+    enc_join(req->sender);
+    enc_cond_destroy(&req->done_cv);
+    enc_mutex_destroy(&req->mutex);
     if (show_ticks && ui_live()) {
         printf("\r\033[K");         /* clear the live line; the final row replaces it */
     }
@@ -192,8 +215,10 @@ static int benchmark(int coid, const uint8_t key[ENC_KEY_LEN], const bench_optio
         unsigned run = i - opt->warmups + 1;
         bool checked = measured && (run == 1 || opt->verify_all);
 
-        if (request_start(&req, coid, data, opt->len, encrypted) != 0) {
-            ui_error("encclient", "cannot start a sender thread");
+        int err = request_start(&req, coid, data, opt->len, encrypted);
+
+        if (err != 0) {
+            ui_error("encclient", "cannot start a sender thread: %s", strerror(err));
             ok = false;
             break;
         }
@@ -202,7 +227,7 @@ static int benchmark(int coid, const uint8_t key[ENC_KEY_LEN], const bench_optio
             if (human && opt->runs > 1 && ui_live()) {
                 putchar('\n');
             }
-            ui_error("encclient", "request failed: %s", strerror(req.err));
+            ui_error("encclient", "request failed: %s", encsvc_strerror(req.err));
             ok = false;
             break;
         }
@@ -215,10 +240,12 @@ static int benchmark(int coid, const uint8_t key[ENC_KEY_LEN], const bench_optio
         stat_add(&enc, req.reply.encryption_ns);
         stat_add(&rtt, req.round_trip_ns);
         done++;
-        if (csv != NULL) {
+        if (csv != NULL &&
             fprintf(csv, "%u,%zu,%u,%u,%.1f,%.1f,%s\n", req.reply.workers, opt->len,
                     req.reply.segments, run, (double)req.reply.encryption_ns / 1e3,
-                    (double)req.round_trip_ns / 1e3, checked ? (ok ? "pass" : "FAIL") : "-");
+                    (double)req.round_trip_ns / 1e3, checked ? (ok ? "pass" : "FAIL") : "-") < 0) {
+            ui_error("encclient", "cannot write %s: %s", opt->csv_path, strerror(errno));
+            ok = false;
         }
         if (human && opt->runs > 1) {
             ui_progress("progress", run, opt->runs, "runs");
@@ -262,8 +289,9 @@ static int benchmark(int coid, const uint8_t key[ENC_KEY_LEN], const bench_optio
     }
 
 out:
-    if (csv != NULL) {
-        fclose(csv);
+    if (csv != NULL && fclose(csv) != 0 && ok) {
+        ui_error("encclient", "cannot write %s: %s", opt->csv_path, strerror(errno));
+        ok = false;
     }
     free(data);
     free(encrypted);
@@ -352,6 +380,9 @@ int main(int argc, char **argv)
     } else {
         status = benchmark(coid, key, &bench);
     }
-    name_close(coid);
+    if (name_close(coid) == -1) {
+        ui_error("encclient", "name_close: %s", strerror(errno));
+        status = 1;
+    }
     return status;
 }
