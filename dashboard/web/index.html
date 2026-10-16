@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>QNX Encryption Workflow</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Cpath d='M11 14v-3a5 5 0 0 1 10 0v3' stroke='white' stroke-width='2.5' fill='none'/%3E%3Crect x='8' y='14' width='16' height='11' rx='2' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>QNX Concurrent Encryption</h1>
+      <p id="target">Raspberry Pi 4B · QNX 8.0</p>
+    </div>
+    <div class="chips" aria-live="polite">
+      <span class="chip" id="chipPi"><span class="dot"></span><span class="chip-text">Pi not connected</span></span>
+      <span class="chip" id="chipServer"><span class="dot"></span><span class="chip-text">encserver not started</span></span>
+    </div>
+    <div class="top-actions">
+      <label class="switch" title="Open a command-prompt window that shows the work while a step runs">
+        <input type="checkbox" id="autoConsole"> <span>Pop-up console</span>
+      </label>
+      <button class="btn" id="btnConsole" type="button">Open console</button>
+      <button class="btn" id="btnServerLog" type="button" disabled>encserver log</button>
+      <button class="btn ghost" id="btnReset" type="button">Start over</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" role="tab" aria-selected="true" data-tab="workflow">Workflow
+      <span class="tab-count" id="progressCount"></span></button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="analytics">Analytics
+      <span class="tab-dot" id="analyticsDot" hidden></span></button>
+  </nav>
+
+  <main>
+    <section id="tab-workflow" class="tab-pane" role="tabpanel">
+      <ol class="rail" id="rail" aria-label="Workflow progress"></ol>
+      <div id="steps"></div>
+    </section>
+
+    <section id="tab-analytics" class="tab-pane" role="tabpanel" hidden>
+      <div id="analytics"></div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <div class="tooltip" id="tooltip" hidden></div>
+
+  <script src="charts.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

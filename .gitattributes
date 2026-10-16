@@ -4,3 +4,5 @@ Makefile text eol=lf
 
 # Example files must reach the Pi byte for byte (no line-ending changes).
 examples/** -text
+*.bat text eol=crlf
+*.cmd text eol=crlf

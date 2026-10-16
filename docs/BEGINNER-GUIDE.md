@@ -9,6 +9,8 @@ This guide is for you if you did not write this code. You need no C or QNX knowl
 
 [LAB-GUIDE.md](LAB-GUIDE.md) has the deeper details (preparing the SD card, Momentics, Excel charts). You only need it if this guide sends you there.
 
+**Prefer clicking?** `dashboard\launch_dashboard.bat` does Parts 2 to 8 for you from the PC, one button per step, and opens command-prompt windows that show the same output as the two Pi windows below. See [dashboard/README.md](../dashboard/README.md). This guide is still the way to learn what each command does.
+
 ---
 
 ## 1. What the project does

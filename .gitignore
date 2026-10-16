@@ -6,4 +6,5 @@ results.csv
 *.enc
 demo-out/
 big.bin
-dashboard/*.exe
+dashboard/runs/
+__pycache__/

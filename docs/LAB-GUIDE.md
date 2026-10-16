@@ -167,6 +167,11 @@ This copies `encserver`, `encclient`, `demo.sh`, `bench.sh`, `lib.sh` and the `e
 
 ## Part 7: The demo (on the Pi)
 
+**Or from the PC:** `dashboard\launch_dashboard.bat` runs the same demo as ten steps from a page at
+<http://localhost:8080>. It opens one window with the encserver log and one with the client side,
+with the same output as the two SSH windows below, and collects the numbers as charts.
+See [dashboard/README.md](../dashboard/README.md).
+
 Use **two SSH windows** side by side, both logged in to the Pi (Part 3):
 
 | Left window: the server | Right window: the demo |
