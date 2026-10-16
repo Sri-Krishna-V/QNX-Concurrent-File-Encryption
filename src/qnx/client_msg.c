@@ -1,3 +1,4 @@
+
 /*
  * client_msg.c - the client side of the protocol in protocol.h.
  *
@@ -14,6 +15,7 @@
 #include <errno.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>                 /* SETIOV (QNX 8.0 declares it here) */
 
 #include <sys/neutrino.h>
 #include <sys/netmgr.h>
@@ -128,7 +130,7 @@ int encsvc_encrypt(int coid, const encsvc_notify_t *notify, const uint8_t *data,
 
     /* 1. ENCRYPT: the server copies the Data Block and answers at once. */
     SETIOV(&siov[0], &request, sizeof request);
-    SETIOV(&siov[1], data, len);
+    SETIOV(&siov[1], (void *)data, len);    /* send parts are only read; SETIOV takes void * */
     SETIOV(&riov[0], &accepted, sizeof accepted);
     err = arm_timeout(_NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY, deadline);
     if (err != 0) {

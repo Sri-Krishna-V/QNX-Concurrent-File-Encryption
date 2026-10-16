@@ -23,6 +23,7 @@ The code shows:
 | [docs/adr/0002-encrypted-file-without-integrity-check.md](docs/adr/0002-encrypted-file-without-integrity-check.md) | Why Encrypted Files have no MAC and are decrypted on the client |
 | [docs/VIVA-NOTES.md](docs/VIVA-NOTES.md) | Viva preparation: the rubric mapped to this repo, and likely questions with answers |
 | [CONTEXT.md](CONTEXT.md) | Glossary: Data Block, Segment, Job, Task, Worker Pool, Event, Fetch… |
+| [dashboard/README.md](dashboard/README.md) | The workflow dashboard: the ten steps, the console windows, settings |
 
 ## Layout
 
@@ -33,6 +34,20 @@ tests/         host tests, plus a message-passing stand-in for end-to-end tests
 scripts/       demo.sh (guided demo), bench.sh (benchmark), lib.sh; all run on the Pi
 examples/      real sample files for the demo: text, CSV, JSON, PDF, PNG, WAV
 bin/aarch64le/ build output for the Pi
+dashboard/     the workflow dashboard: runs every step on the Pi from this PC, shows the results
+```
+
+## Dashboard
+
+`dashboard\launch_dashboard.bat` opens a page at <http://localhost:8080> that takes you from
+connecting to the Pi to the analytics in ten clicks: build, deploy, key, start encserver, encrypt
+files, parallel Jobs, several clients, the scaling benchmark, clean up. The work shows in
+command-prompt windows, as it would in SSH windows on the Pi (encclient's progress bars, the
+encserver log, scp's transfer figures); the results and charts show on the page.
+See [dashboard/README.md](dashboard/README.md).
+
+```sh
+py -m unittest discover -s dashboard/tests     # dashboard tests (no Pi needed)
 ```
 
 ## Build
