@@ -335,7 +335,7 @@ The server runs in the left window (`./encserver -v`). Type these commands in th
   cmp examples/qnx-pi.png qnx-pi-copy.png && echo identical
   ```
 
-  Do the same with `report.pdf`, `tone.wav`, `sensor-log.csv` and `config.json` if you like. In the left window, bigger files use more workers: `sensor-log.csv` (182 KB) is split into 12 Segments, 3 for each worker.
+  Do the same with `report.pdf`, `tone.wav`, `sensor-log.csv` and `config.json` if you like. In the left window, bigger files use more workers: `sensor-log.csv` (182 KB) is split into 12 Segments, shared among `w0`–`w3`. How many each worker gets changes from run to run (for example `4 1 3 4`), because a worker that is free takes the next Segment.
 
 - [ ] Open the decrypted picture on the PC. In a **PC** window, this copies it into your Downloads folder and opens it:
 
@@ -422,7 +422,7 @@ The server runs in the left window (`./encserver -v`). Type these commands in th
   cat client1.log client2.log client3.log
   ```
 
-  In the **left window**, Jobs from three different `pid` numbers are mixed together. Each `cat` part ends with a `✔` line.
+  In the **left window**, Jobs from three different `pid` numbers are mixed together. Each `cat` part ends with an `OK` line (`status OK encrypted`, or `check OK run 1 verified`). The log files use plain `OK` and `#` instead of `✔` and `█`, because they are not a terminal.
 
 ### 7.I Measure the speed (benchmark mode)
 
@@ -563,7 +563,7 @@ Each command below must **fail** with the message shown. That is the feature: th
   export ENC_ASCII=1
   ```
 
-- [ ] Turn colours off with `export NO_COLOR=1`. Undo both with `unset ENC_ASCII NO_COLOR`.
+- [ ] Turn colours off with `export NO_COLOR=1`. This also switches to the plain ASCII symbols. Undo both with `unset ENC_ASCII NO_COLOR`.
 
 ---
 
