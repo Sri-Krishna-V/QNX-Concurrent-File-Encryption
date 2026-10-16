@@ -324,7 +324,11 @@ static void test_server_rejects_bad_requests(void)
     name_close(coid);
 }
 
-/* A Job can be fetched only on the connection that sent it, and only once. */
+/*
+ * A Job can be fetched only by the client that sent it (its scoid), and only
+ * once. In the shim each name_open() is a separate client; on QNX the scoid is
+ * per process, so a's and b's would be two processes.
+ */
 static void test_fetch_needs_same_connection(void)
 {
     uint8_t data[64] = { 1 }, out[64];
@@ -392,6 +396,34 @@ static void test_disconnect_frees_jobs(void)
     CHECK(wait_open_jobs(0), "disconnect frees every Job of that client (holds %u)", shim_open_jobs());
     CHECK(encsvc_notify_close(&notify) == 0, "notify close");
     CHECK(slots_all_free(), "after the disconnect, all %u Job slots are free again", ENC_MAX_JOBS);
+}
+
+/*
+ * QNX 8 delivers only registered events. A Job whose event cannot be delivered
+ * is treated like an abandoned one: freed, and its slot given back.
+ */
+static void test_unregistered_event_frees_job(void)
+{
+    uint8_t data[2048] = { 5 }, out[2048];
+    int coid = name_open(ENCSVC_NAME, 0);
+    encsvc_notify_t notify;
+    struct sigevent unregistered;
+    uint32_t id = 0;
+    int err;
+
+    CHECK(wait_open_jobs(0), "no Jobs held before the test");
+    CHECK(encsvc_notify_open(&notify, coid) == 0, "notify open");
+    SIGEV_PULSE_INIT(&unregistered, notify.self_coid, SIGEV_PULSE_PRIO_INHERIT, ENCSVC_PULSE_DONE, 0);
+    CHECK(raw_encrypt(coid, ENCSVC_MSG_ENCRYPT, sizeof data, data, sizeof data, &unregistered, &id) == 0,
+          "ENCRYPT with an unregistered event is accepted");
+    do {
+        err = raw_fetch(coid, id, out, sizeof out);  /* EAGAIN until the Job is done */
+    } while (err == EAGAIN && usleep(1000) == 0);
+    CHECK(err == ENOENT, "the undeliverable Job is freed, so FETCH finds nothing: %s", strerror(err));
+    CHECK(encsvc_notify_close(&notify) == 0, "notify close");
+    name_close(coid);
+    CHECK(wait_open_jobs(0), "disconnect clears the shim's count");
+    CHECK(slots_all_free(), "after an undeliverable event, all %u Job slots are free again", ENC_MAX_JOBS);
 }
 
 /*
@@ -499,6 +531,7 @@ int main(void)
     test_server_rejects_bad_requests();
     test_fetch_needs_same_connection();
     test_disconnect_frees_jobs();
+    test_unregistered_event_frees_job();
     test_waiting_request_times_out();
     test_concurrent_clients();
 

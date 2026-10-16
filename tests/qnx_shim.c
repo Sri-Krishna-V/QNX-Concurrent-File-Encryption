@@ -14,7 +14,12 @@
  *     When a reply-blocked send times out, the server gets _PULSE_CODE_UNBLOCK
  *     (as with _NTO_CHF_UNBLOCK) and the sender stays blocked until answered.
  *   - Replying to an unknown rcvid fails with ESRCH.
- * Not modelled: priorities, process death, event registration (accepted as is).
+ *   - MsgRegisterEvent() changes the event (QNX swaps it for a handle), and
+ *     MsgDeliverEvent() refuses an event that was not registered (EACCES).
+ *   - Each name_open() stands for a separate client process: on QNX the
+ *     scoid is per process, and the disconnect pulse comes when all of a
+ *     process's connections are closed.
+ * Not modelled: priorities, process death.
  */
 #include <pthread.h>
 #include <stdbool.h>
@@ -32,6 +37,7 @@
 #define MAX_CHANNELS    256
 #define MAX_PULSES      64
 #define CHANNEL_COID(c) (10000 + (c))   /* ConnectAttach() result for channel c */
+#define SHIM_REGISTERED 0x10000         /* sigev_notify bit: passed through MsgRegisterEvent() */
 
 typedef struct shim_msg {
     rcvid_t rcvid;
@@ -412,7 +418,11 @@ int MsgDeliverEvent(rcvid_t rcvid, const struct sigevent *event)
 {
     int err;
 
-    if (rcvid <= 0 || event->sigev_notify != SIGEV_PULSE ||
+    if (!(event->sigev_notify & SHIM_REGISTERED)) {
+        errno = EACCES;             /* QNX 8 accepts only registered events by default */
+        return -1;
+    }
+    if (rcvid <= 0 || (event->sigev_notify & ~SHIM_REGISTERED) != SIGEV_PULSE ||
         event->sigev_coid < CHANNEL_COID(1) || event->sigev_coid >= CHANNEL_COID(MAX_CHANNELS)) {
         errno = EINVAL;
         return -1;
@@ -428,15 +438,23 @@ int MsgDeliverEvent(rcvid_t rcvid, const struct sigevent *event)
     return 0;
 }
 
+/* QNX replaces a registered event with a handle; the shim marks it instead. */
 int MsgRegisterEvent(struct sigevent *event, int coid)
 {
-    (void)event; (void)coid;
+    if (coid <= 0 || (event->sigev_notify & SHIM_REGISTERED)) {
+        errno = EINVAL;
+        return -1;
+    }
+    event->sigev_notify |= SHIM_REGISTERED;
     return 0;
 }
 
 int MsgUnregisterEvent(const struct sigevent *event)
 {
-    (void)event;
+    if (!(event->sigev_notify & SHIM_REGISTERED)) {
+        errno = ESRCH;
+        return -1;
+    }
     return 0;
 }
 
@@ -488,7 +506,7 @@ int ConnectDetach(int coid)
     return 0;
 }
 
-int TimerTimeout(clockid_t id, int flags, const struct sigevent *notify, const uint64_t *ntime,
+int TimerTimeout(clockid_t id, uint32_t flags, const struct sigevent *notify, const uint64_t *ntime,
                  uint64_t *otime)
 {
     struct timespec now;
@@ -504,7 +522,7 @@ int TimerTimeout(clockid_t id, int flags, const struct sigevent *notify, const u
         now.tv_nsec -= 1000000000L;
     }
     timeout.armed = true;
-    timeout.states = flags;
+    timeout.states = (int)flags;
     timeout.deadline = now;
     return 0;
 }
