@@ -372,6 +372,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // Initialize simulation and calculator
   updateSimulation();
   calculateCounter();
+  initLiveControlCenter();
 
   // Resize listener for chart
   window.addEventListener('resize', () => {
@@ -380,3 +381,235 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 });
+
+/* =========================================================================
+   LIVE CONTROL CENTER BACKEND INTEGRATION
+   ========================================================================= */
+
+let eventSource = null;
+let serverAutoScroll = true;
+let clientAutoScroll = true;
+
+function initLiveControlCenter() {
+  if (window.EventSource) {
+    connectEventStream();
+  }
+  // Initial status check
+  refreshSystemStatus();
+}
+
+function connectEventStream() {
+  if (eventSource) {
+    eventSource.close();
+  }
+
+  try {
+    eventSource = new EventSource('/api/stream');
+
+    eventSource.addEventListener('status_update', (e) => {
+      const data = JSON.parse(e.data);
+      updateStatusBadges(data);
+    });
+
+    eventSource.addEventListener('server_log', (e) => {
+      const data = JSON.parse(e.data);
+      appendTerminalLine('liveServerTerm', data.line, data.style);
+    });
+
+    eventSource.addEventListener('client_log', (e) => {
+      const data = JSON.parse(e.data);
+      appendTerminalLine('liveClientTerm', data.line, data.style);
+    });
+
+    eventSource.onerror = () => {
+      // Retry in 5 seconds
+      setTimeout(connectEventStream, 5000);
+    };
+  } catch (err) {
+    console.warn('SSE stream not available, falling back to static polling');
+  }
+}
+
+function updateStatusBadges(data) {
+  // Update Mode UI
+  const modeVal = data.mode || 'simulation';
+  document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === (data.configured_mode || 'auto'));
+  });
+
+  const modeBadge = document.getElementById('statusModeBadge');
+  if (modeBadge) {
+    if (modeVal === 'hardware') {
+      modeBadge.className = 'link-pill online';
+      modeBadge.innerHTML = '<span>⚡ Live Hardware (Pi 4B)</span>';
+    } else {
+      modeBadge.className = 'link-pill offline';
+      modeBadge.innerHTML = '<span>🧪 Virtual Simulation Mode</span>';
+    }
+  }
+
+  // Pi Link Status
+  const piPill = document.getElementById('statusPiLink');
+  if (piPill) {
+    if (data.ssh) {
+      piPill.className = 'link-pill online';
+      piPill.innerHTML = '<span class="pulse-dot"></span> <span>Pi 4B: Online (10.0.0.1)</span>';
+    } else if (data.ping) {
+      piPill.className = 'link-pill offline';
+      piPill.innerHTML = '<span>⚠️ Pi: Ping OK, SSH connecting...</span>';
+    } else {
+      piPill.className = 'link-pill offline';
+      piPill.innerHTML = '<span>🔌 Pi: Offline (10.0.0.1)</span>';
+    }
+  }
+
+  // SDP Status
+  const sdpPill = document.getElementById('statusSdp');
+  if (sdpPill) {
+    if (data.sdp_path) {
+      sdpPill.className = 'link-pill online';
+      sdpPill.innerHTML = '<span>✔ QNX 8.0 SDP Toolchain</span>';
+      sdpPill.title = data.sdp_path;
+    } else {
+      sdpPill.className = 'link-pill offline';
+      sdpPill.innerHTML = '<span>⚠️ SDP Toolchain Not Found</span>';
+    }
+  }
+
+  // Server Process Status
+  const serverPill = document.getElementById('statusServerState');
+  const btnStartServer = document.getElementById('btnStartServer');
+  const btnStopServer = document.getElementById('btnStopServer');
+
+  if (serverPill) {
+    if (data.server_running) {
+      serverPill.className = 'link-pill active-running';
+      serverPill.innerHTML = '<span class="pulse-dot" style="background:#6366f1;"></span> <span>encserver: RUNNING</span>';
+      if (btnStartServer) btnStartServer.disabled = true;
+      if (btnStopServer) btnStopServer.disabled = false;
+    } else {
+      serverPill.className = 'link-pill';
+      serverPill.innerHTML = '<span>encserver: IDLE</span>';
+      if (btnStartServer) btnStartServer.disabled = false;
+      if (btnStopServer) btnStopServer.disabled = true;
+    }
+  }
+}
+
+function refreshSystemStatus() {
+  fetch('/api/status')
+    .then(r => r.json())
+    .then(data => updateStatusBadges(data))
+    .catch(() => {
+      // Local server might not be running backend
+    });
+}
+
+function setControlMode(mode) {
+  fetch('/api/mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: mode })
+  }).then(r => r.json())
+    .then(d => {
+      showToast(`Switched mode to: ${d.mode}`);
+      refreshSystemStatus();
+    });
+}
+
+function triggerServerStart() {
+  const btn = document.getElementById('btnStartServer');
+  if (btn) btn.disabled = true;
+  showToast('Starting encserver -v...');
+
+  fetch('/api/server/start', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      showToast(data.message);
+      refreshSystemStatus();
+    });
+}
+
+function triggerServerStop() {
+  const btn = document.getElementById('btnStopServer');
+  if (btn) btn.disabled = true;
+  showToast('Stopping encserver (slay)...');
+
+  fetch('/api/server/stop', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      showToast(data.message);
+      refreshSystemStatus();
+    });
+}
+
+function triggerCommand(commandId, customCmd) {
+  showToast(`Executing: ${commandId}...`);
+  const activeBtn = document.querySelector(`[data-cmd="${commandId}"]`);
+  if (activeBtn) {
+    activeBtn.classList.add('running');
+    activeBtn.innerHTML = '<span>⏳ Running...</span>';
+  }
+
+  fetch('/api/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command_id: commandId, custom_cmd: customCmd })
+  }).then(r => r.json())
+    .then(data => {
+      setTimeout(() => {
+        if (activeBtn) {
+          activeBtn.classList.remove('running');
+          activeBtn.innerHTML = '<span>▶ Run Again</span>';
+        }
+      }, 1500);
+    }).catch(err => {
+      if (activeBtn) {
+        activeBtn.classList.remove('running');
+        activeBtn.innerHTML = '<span>▶ Run</span>';
+      }
+    });
+}
+
+function appendTerminalLine(termId, line, styleClass) {
+  const term = document.getElementById(termId);
+  if (!term) return;
+
+  const span = document.createElement('span');
+  if (styleClass) span.className = styleClass;
+
+  // Simple ANSI color parsing
+  let cleanLine = line
+    .replace(/\x1b\[1;32m/g, '<span class="success">')
+    .replace(/\x1b\[1;31m/g, '<span class="error-text">')
+    .replace(/\x1b\[36m/g, '<span class="info-text">')
+    .replace(/\x1b\[33m/g, '<span class="cmd">')
+    .replace(/\x1b\[2m/g, '<span class="dim">')
+    .replace(/\x1b\[0m/g, '</span>');
+
+  span.innerHTML = cleanLine;
+  term.appendChild(span);
+
+  if ((termId === 'liveServerTerm' && serverAutoScroll) ||
+      (termId === 'liveClientTerm' && clientAutoScroll)) {
+    term.scrollTop = term.scrollHeight;
+  }
+}
+
+function clearTerm(termId) {
+  const term = document.getElementById(termId);
+  if (term) term.innerHTML = '';
+}
+
+function toggleAutoScroll(termId, btn) {
+  if (termId === 'liveServerTerm') {
+    serverAutoScroll = !serverAutoScroll;
+    btn.classList.toggle('active', serverAutoScroll);
+    btn.textContent = serverAutoScroll ? 'Scroll: ON' : 'Scroll: OFF';
+  } else {
+    clientAutoScroll = !clientAutoScroll;
+    btn.classList.toggle('active', clientAutoScroll);
+    btn.textContent = clientAutoScroll ? 'Scroll: ON' : 'Scroll: OFF';
+  }
+}
+

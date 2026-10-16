@@ -1,6 +1,6 @@
 @echo off
-title QNX Concurrent Encryption Dashboard
-echo Starting QNX Concurrent Encryption Dashboard...
+title QNX Concurrent Encryption - Live Control Center
+echo Starting QNX Live Control Center Backend...
 start "" "http://localhost:8080"
-python -m http.server 8080 --directory "%~dp0"
+python "%~dp0backend_server.py"
 pause

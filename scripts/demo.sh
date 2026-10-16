@@ -69,7 +69,8 @@ show_header() {
 
 # compare ORIGINAL RESTORED: report whether the round trip gave the same bytes.
 compare() {
-    bytes=$(wc -c < "$1" | tr -d ' ')
+    set -- $(wc -c < "$1")
+    bytes=$1
     if same_bytes "$1" "$2"; then
         good "identical: $2 has exactly the same $bytes bytes as the original $1"
     else
@@ -145,12 +146,13 @@ step1() {
 # previous run left a wrong-sized one (for example after Ctrl-C during dd).
 BIG_BYTES=12582912
 make_big() {
-    if [ -f big.bin ] && [ "$(wc -c < big.bin | tr -d ' ')" = "$BIG_BYTES" ]; then
+    set -- $(wc -c < big.bin 2>/dev/null || echo 0)
+    if [ -f big.bin ] && [ "$1" = "$BIG_BYTES" ]; then
         return 0
     fi
     rm -f big.bin
     run dd if=/dev/urandom of=big.bin bs=65536 count=192 2> /dev/null
-    [ "$(wc -c < big.bin | tr -d ' ')" = "$BIG_BYTES" ] || die "could not make a 12 MB big.bin"
+    set -- $(wc -c < big.bin); [ "$1" = "$BIG_BYTES" ] || die "could not make a 12 MB big.bin"
 }
 
 # file_type NAME -> short description from the extension

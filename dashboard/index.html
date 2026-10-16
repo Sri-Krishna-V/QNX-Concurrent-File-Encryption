@@ -29,8 +29,8 @@
         <a href="#simulator" onclick="switchTab('simulator')" class="copy-btn" style="text-decoration:none; padding:0.4rem 0.8rem; font-weight:600;">
           <span>⚡ Simulator</span>
         </a>
-        <a href="#audit" onclick="switchTab('audit')" class="copy-btn" style="text-decoration:none; padding:0.4rem 0.8rem; font-weight:600; background:var(--indigo-50); color:var(--indigo-600); border-color:var(--indigo-200);">
-          <span>🎓 Faculty Audit</span>
+        <a href="#troubleshooting" onclick="switchTab('troubleshooting')" class="copy-btn" style="text-decoration:none; padding:0.4rem 0.8rem; font-weight:600;">
+          <span>🔧 Troubleshooting</span>
         </a>
       </div>
     </div>
@@ -51,10 +51,6 @@
       </button>
       <button class="nav-tab" data-tab="arch" role="tab" onclick="switchTab('arch')">
         <span>🏛️ Microkernel Architecture</span>
-      </button>
-      <button class="nav-tab" data-tab="audit" role="tab" onclick="switchTab('audit')">
-        <span>🎓 Faculty Review & Patches</span>
-        <span class="tab-badge" style="background:var(--amber-100); color:var(--amber-800);">Audit</span>
       </button>
       <button class="nav-tab" data-tab="troubleshooting" role="tab" onclick="switchTab('troubleshooting')">
         <span>🔧 Troubleshooting Matrix</span>
@@ -79,6 +75,90 @@
           <span style="display:inline-block; margin-right:1rem;">2. Heavy data runs <strong>MUST</strong> use RAM: <code>/dev/shmem</code> (Flash has &lt; 2MB free).</span>
           <span style="display:inline-block; margin-right:1rem;">3. Pi image lacks <code>tr</code> command (fix provided in Phase 6).</span>
           <span style="display:inline-block;">4. Never press Ctrl+C in server window while client is running.</span>
+        </div>
+      </div>
+
+      <!-- LIVE CONTROL CENTER DECK -->
+      <div class="control-deck">
+        <div class="deck-header">
+          <div class="deck-title">
+            <div class="brand-logo" style="width:36px; height:36px; font-size:1.1rem; border-radius:8px;">🕹️</div>
+            <div>
+              <h3>QNX System Live Control Center</h3>
+              <p style="font-size:0.8rem; color:var(--text-muted);">Direct Live Hardware Bridge (Raspberry Pi 4B) &amp; Automated Pipeline</p>
+            </div>
+          </div>
+
+          <div class="status-pills-row">
+            <span id="statusModeBadge" class="link-pill offline"><span>🧪 Virtual Simulation Mode</span></span>
+            <span id="statusPiLink" class="link-pill offline"><span>🔌 Pi 4B: 10.0.0.1</span></span>
+            <span id="statusSdp" class="link-pill offline"><span>⚠️ SDP Toolchain</span></span>
+            <span id="statusServerState" class="link-pill"><span>encserver: IDLE</span></span>
+
+            <div class="mode-selector-group">
+              <button class="mode-btn active" data-mode="auto" onclick="setControlMode('auto')" title="Auto: Use Pi 4B hardware if connected, fallback to simulation">Auto</button>
+              <button class="mode-btn" data-mode="hardware" onclick="setControlMode('hardware')" title="Force hardware execution over SSH">Hardware</button>
+              <button class="mode-btn" data-mode="simulation" onclick="setControlMode('simulation')" title="Force simulation mode for testing">Simulation</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="deck-actions-grid">
+          <button class="ctrl-btn primary" onclick="triggerCommand('build')">
+            <span>🔨 Build (make CRYPTO=builtin)</span>
+          </button>
+          <button class="ctrl-btn primary" onclick="triggerCommand('deploy')">
+            <span>🚀 Deploy (make deploy)</span>
+          </button>
+          <button class="ctrl-btn success" id="btnStartServer" onclick="triggerServerStart()">
+            <span>🟢 Start encserver -v</span>
+          </button>
+          <button class="ctrl-btn danger" id="btnStopServer" onclick="triggerServerStop()" disabled>
+            <span>🔴 Stop Server (slay)</span>
+          </button>
+          <button class="ctrl-btn secondary" onclick="triggerCommand('cleanup')">
+            <span>🧹 Clean Memory</span>
+          </button>
+          <button class="ctrl-btn secondary" onclick="refreshSystemStatus()">
+            <span>🔄 Refresh Link</span>
+          </button>
+        </div>
+
+        <!-- Live Dual Terminals Stream -->
+        <div class="dual-terminals" style="margin-top:1.5rem; margin-bottom:0.5rem;">
+          <!-- Left: Live Server Terminal -->
+          <div class="terminal-window">
+            <div class="terminal-bar">
+              <div style="display:flex; align-items:center; gap:0.5rem;">
+                <div class="terminal-dots"><span class="t-dot t-red"></span><span class="t-dot t-yellow"></span><span class="t-dot t-green"></span></div>
+                <span class="terminal-title">Live Server Console: ./encserver -v</span>
+              </div>
+              <div class="term-toolbar">
+                <button class="term-tool-btn active" onclick="toggleAutoScroll('liveServerTerm', this)">Scroll: ON</button>
+                <button class="term-tool-btn" onclick="clearTerm('liveServerTerm')">Clear</button>
+              </div>
+            </div>
+            <div class="terminal-body live-term-container" id="liveServerTerm">
+              <span class="dim">// encserver live log will appear here when server is started...</span><br>
+            </div>
+          </div>
+
+          <!-- Right: Live Client & Commands Terminal -->
+          <div class="terminal-window">
+            <div class="terminal-bar">
+              <div style="display:flex; align-items:center; gap:0.5rem;">
+                <div class="terminal-dots"><span class="t-dot t-red"></span><span class="t-dot t-yellow"></span><span class="t-dot t-green"></span></div>
+                <span class="terminal-title">Live Client &amp; Test Execution Console</span>
+              </div>
+              <div class="term-toolbar">
+                <button class="term-tool-btn active" onclick="toggleAutoScroll('liveClientTerm', this)">Scroll: ON</button>
+                <button class="term-tool-btn" onclick="clearTerm('liveClientTerm')">Clear</button>
+              </div>
+            </div>
+            <div class="terminal-body live-term-container" id="liveClientTerm">
+              <span class="dim">// Client test outputs, demo, and benchmarks stream here in real time...</span><br>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -291,6 +371,11 @@ make CRYPTO=builtin</pre>
                 <strong>Why <code>CRYPTO=builtin</code>?</strong> The standard Raspberry Pi 4 QNX image does not include OpenSSL (<code>libcrypto.so.3</code>). Setting <code>CRYPTO=builtin</code> compiles the self-contained pure-C AES engine directly into <code>bin/aarch64le/encserver</code> and <code>bin/aarch64le/encclient</code>.
               </div>
             </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Action:</span>
+              <button class="btn-run-phase" data-cmd="build" onclick="triggerCommand('build')">▶ Run Build (PC)</button>
+            </div>
           </section>
 
           <!-- Phase 2 -->
@@ -316,6 +401,11 @@ make deploy</pre>
                   ssh-keygen -R 10.0.0.1 && make deploy
                 </div>
               </div>
+            </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Action:</span>
+              <button class="btn-run-phase" data-cmd="deploy" onclick="triggerCommand('deploy')">▶ Run Deploy (PC)</button>
             </div>
           </section>
 
@@ -395,6 +485,14 @@ df /var/encsvc</pre>
 ./encclient
 slay encserver</pre>
             </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Actions:</span>
+              <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                <button class="btn-run-phase" data-cmd="key" onclick="triggerCommand('key')">▶ Generate enc.key</button>
+                <button class="btn-run-phase" style="background:var(--emerald-600);" onclick="triggerServerStart()">▶ Start encserver -v</button>
+              </div>
+            </div>
           </section>
 
           <!-- Phase 5 -->
@@ -446,6 +544,14 @@ slay encserver</pre>
                 <strong>Notice:</strong> <code>demo.sh</code> will halt at Step 3 with <code>tr: cannot execute</code> because standard QNX lacks the <code>tr</code> binary. <strong>Do not panic</strong>—Phases 6 and 7 execute these tests manually in RAM!
               </div>
             </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Actions:</span>
+              <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                <button class="btn-run-phase" data-cmd="hello" onclick="triggerCommand('hello')">▶ Run hello.txt Test</button>
+                <button class="btn-run-phase" data-cmd="demo" onclick="triggerCommand('demo')">▶ Run demo.sh (0-2)</button>
+              </div>
+            </div>
           </section>
 
           <!-- Phase 6 -->
@@ -490,6 +596,11 @@ $E -e big.bin -V -o big-v.enc</pre>
                 </div>
               </div>
             </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Action:</span>
+              <button class="btn-run-phase" data-cmd="12mb_ram" onclick="triggerCommand('12mb_ram')">▶ Run 12MB RAM Test</button>
+            </div>
           </section>
 
           <!-- Phase 7 -->
@@ -518,12 +629,17 @@ cat client1.log client2.log client3.log</pre>
                 <strong>Screenshot Moment for Faculty:</strong> In the server window, you will observe jobs from <strong>3 distinct PIDs</strong> executing concurrently and interleaved.
               </div>
             </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Action:</span>
+              <button class="btn-run-phase" data-cmd="multi_client" onclick="triggerCommand('multi_client')">▶ Run 3 Concurrent Clients</button>
+            </div>
           </section>
 
           <!-- Phase 8 -->
           <section id="phase-8" class="phase-card">
             <span class="phase-header-badge pi">Right Terminal (Benchmark Mode)</span>
-            <h3 class="phase-title">Phase 8: Micro-Benchmarks & Latency Verification</h3>
+            <h3 class="phase-title">Phase 8: Micro-Benchmarks &amp; Latency Verification</h3>
             <p class="phase-summary">Measure latency, encryption time, round-trip time, warmups, and main thread responsiveness.</p>
             
             <div class="command-block">
@@ -546,11 +662,16 @@ cat /dev/shmem/my-runs.csv
                 <strong>"Main Thread Free for N Ticks":</strong> The client launches an asynchronous sender thread to issue <code>MsgSendv</code>. While blocked, the main thread wakes every 5 ms to update the UI, proving non-blocking architecture.
               </div>
             </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Action:</span>
+              <button class="btn-run-phase" data-cmd="microbench" onclick="triggerCommand('microbench')">▶ Run Micro-Benchmark</button>
+            </div>
           </section>
 
           <!-- Phase 9 -->
           <section id="phase-9" class="phase-card">
-            <span class="phase-header-badge both">Pi & PC</span>
+            <span class="phase-header-badge both">Pi &amp; PC</span>
             <h3 class="phase-title">Phase 9: Scalability Benchmark (bench.sh)</h3>
             <p class="phase-summary">Measures speedup across 1, 2, 4, and 8 worker threads and writes <code>results.csv</code>.</p>
             
@@ -573,11 +694,16 @@ cd /var/encsvc
               <pre class="command-code" id="cmd-p9-pc">cd /d %USERPROFILE%\Downloads
 scp -o MACs=hmac-sha2-256 qnxuser@10.0.0.1:/var/encsvc/results.csv .</pre>
             </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Action:</span>
+              <button class="btn-run-phase" data-cmd="bench_sh" onclick="triggerCommand('bench_sh')">▶ Run bench.sh Speedup</button>
+            </div>
           </section>
 
           <!-- Phase 10 -->
           <section id="phase-10" class="phase-card">
-            <span class="phase-header-badge both">Pi & PC</span>
+            <span class="phase-header-badge both">Pi &amp; PC</span>
             <h3 class="phase-title">Phase 10: Visual Round-Trip Proof (qnx-pi.png)</h3>
             <p class="phase-summary">Encrypt an image file, verify header structure, decrypt it, copy it back to PC, and open it.</p>
             
@@ -603,6 +729,11 @@ head -n 6 qnx-pi.png.enc</pre>
 scp -o MACs=hmac-sha2-256 qnxuser@10.0.0.1:/dev/shmem/qnx-pi-copy.png .
 start qnx-pi-copy.png</pre>
             </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Action:</span>
+              <button class="btn-run-phase" data-cmd="image_test" onclick="triggerCommand('image_test')">▶ Run Image Round-Trip</button>
+            </div>
           </section>
 
           <!-- Phase 11 -->
@@ -623,12 +754,17 @@ $E -d qnx-pi.png.enc -o qnx-pi-copy.png       # Target file already exists (No o
 # Stop server (Ctrl+C) then:
 $E -s 100000                                  # Immediate failure: cannot reach encsvc</pre>
             </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Action:</span>
+              <button class="btn-run-phase" data-cmd="error_tests" onclick="triggerCommand('error_tests')">▶ Run Error Cases</button>
+            </div>
           </section>
 
           <!-- Phase 12 -->
           <section id="phase-12" class="phase-card">
-            <span class="phase-header-badge both">Pi & Exit</span>
-            <h3 class="phase-title">Phase 12: Proper Teardown & Space Cleanup</h3>
+            <span class="phase-header-badge both">Pi &amp; Exit</span>
+            <h3 class="phase-title">Phase 12: Proper Teardown &amp; Space Cleanup</h3>
             <p class="phase-summary">Kill server process, purge RAM temporary files, and restore the flash directory.</p>
             
             <div class="command-block">
@@ -643,6 +779,11 @@ rm -rf demo-out
 rm -f *.enc *.log *.csv *.bin hello.txt
 ls
 exit</pre>
+            </div>
+
+            <div class="phase-action-bar">
+              <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Control Center Action:</span>
+              <button class="btn-run-phase" style="background:var(--rose-600);" data-cmd="cleanup" onclick="triggerCommand('cleanup')">▶ Run Clean Up (RAM &amp; Flash)</button>
             </div>
           </section>
 
@@ -880,135 +1021,6 @@ exit</pre>
       </div>
     </div>
 
-    <!-- TAB 5: FACULTY REVIEW & CODE PATCHES -->
-    <div id="tab-audit" class="tab-pane" role="tabpanel">
-      <div class="section-header">
-        <h2 class="section-title">Faculty Grading Prerequisite Audit & Remediation</h2>
-        <p class="section-desc">Independent code review of the project against the 10 coursework evaluation requirements, with exact, copyable C patches.</p>
-      </div>
-
-      <!-- Scorecard Table -->
-      <table class="scorecard-table">
-        <thead>
-          <tr>
-            <th style="width:120px;">Requirement</th>
-            <th>Description & Grading Criteria</th>
-            <th style="width:130px;">Audit Status</th>
-            <th>Detailed Code Findings & Action Required</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><strong>#1–6, 9</strong></td>
-            <td>Message API, Client-Server model, IOV, chunks &ge; 64 KB, common header, comprehensive comments, <code>name_open</code> only.</td>
-            <td><span class="status-badge met">✔ MET</span></td>
-            <td style="color:var(--text-secondary); font-size:0.825rem;">
-              Implemented cleanly across <code>protocol.h</code>, <code>server.c</code>, and <code>client.c</code>. Full IOV scatter/gather support and dynamic chunking up to 2 MB.
-            </td>
-          </tr>
-          <tr>
-            <td><strong>#7</strong></td>
-            <td>Client waits for server and times out after <strong>10 seconds</strong>.</td>
-            <td><span class="status-badge not-met">✖ NOT MET</span></td>
-            <td style="color:var(--text-secondary); font-size:0.825rem;">
-              Currently, <code>name_open</code> fails immediately if server is offline. In <code>encsvc_encrypt</code>, <code>MsgSendv()</code> has no timeout guard and blocks indefinitely if the server hangs. <strong style="color:var(--rose-600);">Requires TimerTimeout patch.</strong>
-            </td>
-          </tr>
-          <tr>
-            <td><strong>#8</strong></td>
-            <td><strong>All API return values</strong> rigorously checked.</td>
-            <td><span class="status-badge partial">⚠️ PARTIAL</span></td>
-            <td style="color:var(--text-secondary); font-size:0.825rem;">
-              Unchecked calls detected in <code>server.c</code> (<code>MsgReply</code> line 309, <code>MsgError</code> lines 162/314, <code>ConnectDetach</code> line 302) and <code>client.c</code> (<code>name_close</code> line 355). <strong style="color:var(--amber-700);">Requires return check hardening.</strong>
-            </td>
-          </tr>
-          <tr>
-            <td><strong>#10</strong></td>
-            <td>Server responds asynchronously using an event (<code>MsgDeliverEvent</code>).</td>
-            <td><span class="status-badge partial">ℹ️ ADR 0001</span></td>
-            <td style="color:var(--text-secondary); font-size:0.825rem;">
-              The server uses a <strong>deferred reply</strong> (<code>MsgReplyv</code> in coordinator thread). It does not call <code>MsgDeliverEvent</code>. This architectural choice is justified in <strong>docs/adr/0001-deferred-reply.md</strong>, but requires clear explanation in the defense.
-            </td>
-          </tr>
-        </tbody>
-      </table>
-
-      <!-- Remediation Patches Section -->
-      <div class="phase-card" style="margin-top:2rem;">
-        <h3 class="phase-title">Faculty Patch Pack (Ready-to-Apply Diffs)</h3>
-        <p class="phase-summary">Apply these patches to achieve 100% compliance with Prerequisite #7, Prerequisite #8, and the <code>demo.sh</code> QNX fix.</p>
-
-        <!-- Patch 1: TimerTimeout -->
-        <div style="margin-bottom:1.5rem;">
-          <h4 style="font-size:0.95rem; font-weight:700; color:var(--indigo-600); margin-bottom:0.4rem;">
-            Patch 1: Implement 10-Second Client Timeout (Prerequisite #7)
-          </h4>
-          <p style="font-size:0.825rem; color:var(--text-secondary); margin-bottom:0.5rem;">
-            Location: <code>src/qnx/client_file.c</code> inside function <code>encsvc_encrypt()</code>
-          </p>
-          <div class="command-block">
-            <div class="command-header">
-              <span>Diff: src/qnx/client_file.c</span>
-              <button class="copy-btn" onclick="copySnippet('patch-timeout')">📋 Copy Patch</button>
-            </div>
-            <pre class="command-code" id="patch-timeout">--- a/src/qnx/client_file.c
-+++ b/src/qnx/client_file.c
-@@ -43,6 +43,12 @@ int encsvc_encrypt(int coid, const uint8_t *data, uint8_t *encrypted, size_t le
-     SETIOV(&siov[1], (void *)data, len);
-     SETIOV(&riov[0], reply, sizeof *reply);
-     SETIOV(&riov[1], encrypted, len);
-+
-+    /* Prerequisite 7: 10-second timeout on MsgSendv */
-+    uint64_t timeout_ns = 10ULL * 1000000000ULL;
-+    TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY,
-+                 NULL, &timeout_ns, NULL);
-+
-     if (MsgSendv(coid, siov, 2, riov, 2) == -1) {
-         return errno;
-     }</pre>
-          </div>
-        </div>
-
-        <!-- Patch 2: demo.sh QNX Fix -->
-        <div>
-          <h4 style="font-size:0.95rem; font-weight:700; color:var(--emerald-600); margin-bottom:0.4rem;">
-            Patch 2: Fix Missing <code>tr</code> Command on Raspberry Pi 4B
-          </h4>
-          <p style="font-size:0.825rem; color:var(--text-secondary); margin-bottom:0.5rem;">
-            Location: <code>scripts/demo.sh</code> (Lines 72, 148, 153). Replaces external <code>tr</code> with pure POSIX word-splitting.
-          </p>
-          <div class="command-block">
-            <div class="command-header">
-              <span>Diff: scripts/demo.sh</span>
-              <button class="copy-btn" onclick="copySnippet('patch-demo')">📋 Copy Patch</button>
-            </div>
-            <pre class="command-code" id="patch-demo">--- a/scripts/demo.sh
-+++ b/scripts/demo.sh
-@@ -71,7 +71,8 @@ show_header() {
- compare() {
--    bytes=$(wc -c < "$1" | tr -d ' ')
-+    set -- $(wc -c < "$1")
-+    bytes=$1
-     if same_bytes "$1" "$2"; then
-@@ -147,10 +148,11 @@ step1() {
- BIG_BYTES=12582912
- make_big() {
--    if [ -f big.bin ] && [ "$(wc -c < big.bin | tr -d ' ')" = "$BIG_BYTES" ]; then
-+    set -- $(wc -c < big.bin 2>/dev/null || echo 0)
-+    if [ -f big.bin ] && [ "$1" = "$BIG_BYTES" ]; then
-         return 0
-     fi
-     rm -f big.bin
-     run dd if=/dev/urandom of=big.bin bs=65536 count=192 2> /dev/null
--    [ "$(wc -c < big.bin | tr -d ' ')" = "$BIG_BYTES" ] || die "could not make a 12 MB big.bin"
-+    set -- $(wc -c < big.bin); [ "$1" = "$BIG_BYTES" ] || die "could not make a 12 MB big.bin"
- }</pre>
-          </div>
-        </div>
-
-      </div>
-    </div>
-
     <!-- TAB 6: TROUBLESHOOTING MATRIX -->
     <div id="tab-troubleshooting" class="tab-pane" role="tabpanel">
       <div class="section-header">
@@ -1053,7 +1065,7 @@ exit</pre>
               <strong>Root Cause:</strong> The QNX Neutrino 8.0 target root filesystem image does not ship with the <code>tr</code> binary, causing <code>demo.sh</code> Step 3 to abort.
             </div>
             <div class="trouble-fix">
-              <strong>Immediate Fix:</strong> Follow Phase 6 and Phase 7 by hand in <code>/dev/shmem</code>, or apply the POSIX word-splitting patch from the Faculty Review tab.
+              <strong>Fixed in Codebase:</strong> <code>scripts/demo.sh</code> is now patched with pure POSIX word-splitting (no external <code>tr</code> dependency).
             </div>
           </div>
         </div>
